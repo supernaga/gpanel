@@ -1,9 +1,76 @@
 name: Deploy GPanel
+
 on:
 push:
 branches: [ "main" ]
+
+env:
+REGISTRY: ghcr.io
+IMAGE_PREFIX: ghcr.io/${{ github.repository_owner }}/gpanel
+
 jobs:
+build-and-push:
+runs-on: ubuntu-latest
+permissions:
+contents: read
+packages: write
+
+steps:
+- name: Checkout
+uses: actions/checkout@v4
+
+- name: Login GHCR
+uses: docker/login-action@v3
+with:
+registry: ${{ env.REGISTRY }}
+username: ${{ github.actor }}
+password: ${{ secrets.GITHUB_TOKEN }}
+
+- name: Build & Push backend
+run: |
+docker build -t $IMAGE_PREFIX-server:latest ./backend
+docker push $IMAGE_PREFIX-server:latest
+
+- name: Build & Push frontend
+run: |
+docker build -t $IMAGE_PREFIX-web:latest ./frontend
+docker push $IMAGE_PREFIX-web:latest
+
+- name: Build & Push agent
+run: |
+docker build -t $IMAGE_PREFIX-agent:latest ./agent
+docker push $IMAGE_PREFIX-agent:latest
+
 deploy:
 runs-on: ubuntu-latest
+needs: build-and-push
+
 steps:
-- run: echo "workflow placeholder"
+- name: SSH Deploy
+uses: appleboy/ssh-action@v1.0.3
+with:
+host: ${{ secrets.DEPLOY_HOST }}
+username: ${{ secrets.DEPLOY_USER }}
+key: ${{ secrets.DEPLOY_SSH_KEY }}
+script: |
+set -e
+APP_DIR=/opt/gpanel
+if [ ! -d "$APP_DIR/.git" ]; then
+git clone https://github.com/supernaga/gpanel.git $APP_DIR
+fi
+cd $APP_DIR
+git fetch origin
+git reset --hard origin/main
+
+cat > deploy/.env <<EOF
+POSTGRES_PASSWORD=${{ secrets.POSTGRES_PASSWORD }}
+JWT_SECRET=${{ secrets.JWT_SECRET }}
+AGENT_TOKEN=${{ secrets.AGENT_TOKEN }}
+IMAGE_PREFIX=ghcr.io/${{ github.repository_owner }}/gpanel
+EOF
+
+cd deploy
+docker compose pull || true
+docker compose up -d
+docker image prune -f
+
