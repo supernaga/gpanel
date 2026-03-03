@@ -9,6 +9,11 @@ POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
 volumes:
 - pgdata:/var/lib/postgresql/data
 restart: always
+healthcheck:
+test: ["CMD-SHELL", "pg_isready -U gpanel -d gpanel"]
+interval: 10s
+timeout: 5s
+retries: 8
 
 backend:
 image: ${IMAGE_PREFIX}-server:latest
@@ -18,15 +23,22 @@ DB_DSN: postgres://gpanel:${POSTGRES_PASSWORD}@postgres:5432/gpanel?sslmode=disa
 JWT_SECRET: ${JWT_SECRET}
 AGENT_TOKEN: ${AGENT_TOKEN}
 depends_on:
-- postgres
+postgres:
+condition: service_healthy
 restart: always
+healthcheck:
+test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/healthz"]
+interval: 10s
+timeout: 5s
+retries: 8
 
 frontend:
 image: ${IMAGE_PREFIX}-web:latest
 ports:
 - "80:80"
 depends_on:
-- backend
+backend:
+condition: service_healthy
 restart: always
 
 volumes:
