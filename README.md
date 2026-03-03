@@ -1,44 +1,31 @@
-# GOST Panel (Vue + Go)
+# GPanel
 
-首版骨架：
-- 后端：Go（REST + WebSocket）
-- 前端：Vue3 + Vite（暗色后台风格）
+一个用于管理多节点的面板（Panel）+ Agent 项目。
 
-## 已实现
-- 仪表盘：在线节点、流量、活跃客户端、告警（WS 实时刷新）
-- 节点管理：列表、新增、上线/下线切换
-- API 健康检查：`/healthz`
-
-## 目录
-- `backend/` Go API 服务
-- `frontend/` Vue 前端
-- `docker-compose.yml` 一键本地启动
-
-## 运行方式
-### 方式1：Docker Compose
+## 快速安装（推荐）
 ```bash
-cd gost-panel
-docker compose up
-```
-- 前端: http://localhost:5173
-- 后端: http://localhost:8080
+curl -fsSL https://raw.githubusercontent.com/supernaga/gpanel/main/deploy/install-panel.sh | bash
+安装后访问：http://服务器IP
 
-### 方式2：分别启动
-```bash
-# backend
-cd backend
-go mod tidy
-go run main.go
+节点接入
 
-# frontend (new terminal)
-cd frontend
-npm install
-npm run dev
-```
+shell
 
-## 下一步建议（我可以继续直接补）
-1. 登录鉴权（JWT）+ RBAC
-2. 客户端管理（套餐、到期、限速）
-3. 端口转发与规则管理（ACL）
-4. 告警通知（Telegram/Webhook）
-5. 接入真实 GOST 配置下发与回滚
+curl -fsSL https://raw.githubusercontent.com/supernaga/gpanel/main/deploy/install-agent.sh | bash -s -- \
+--panel http://<PANEL_IP>:8080 \
+--token <AGENT_TOKEN> \
+--name node-01
+Docker 手动安装
+
+shell
+
+cd deploy
+docker compose up -d --build
+安全建议（强烈）
+
+• 首次安装后立即修改：
+• POSTGRES_PASSWORD
+• JWT_SECRET
+• AGENT_TOKEN
+• 不要长期使用默认密码。
+
