@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+set -e
+PANEL=""
+TOKEN=""
+NAME="node-$(hostname)"
+IMAGE="${IMAGE:-ghcr.io/supernaga/gpanel-agent:latest}"
+
+while [[ $# -gt 0 ]]; do
+case "$1" in
+--panel) PANEL="$2"; shift 2;;
+--token) TOKEN="$2"; shift 2;;
+--name) NAME="$2"; shift 2;;
+*) shift;;
+esac
+done
+
+if [ -z "$PANEL" ] || [ -z "$TOKEN" ]; then
+echo "Usage: bash install-agent.sh --panel http://PANEL_IP:8080 --token AGENT_TOKEN [--name node-01]"
+exit 1
+fi
+
+command -v docker >/dev/null 2>&1 || curl -fsSL https://get.docker.com | sh
+docker rm -f gpanel-agent >/dev/null 2>&1 || true
+docker run -d --name gpanel-agent --restart always \
+-e PANEL_URL="$PANEL" \
+-e AGENT_TOKEN="$TOKEN" \
+-e NODE_UID="$(cat /etc/machine-id 2>/dev/null || hostname)" \
+-e NODE_NAME="$NAME" \
+-e NODE_IP="$(hostname -I | awk "{print \$1}")" \
+-e AGENT_VERSION="v0.1.0" \
+"$IMAGE"
+
+echo "[OK] agent started"
