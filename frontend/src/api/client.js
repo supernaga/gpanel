@@ -21,7 +21,12 @@ export const api = {
   users: () => req('/api/users'),
   addUser: (payload) => req('/api/users', { method: 'POST', body: JSON.stringify(payload) }),
   updateUser: (id, payload) => req(`/api/users/${id}/update`, { method: 'PATCH', body: JSON.stringify(payload) }),
-  auditLogs: () => req('/api/audit-logs'),
+  auditLogs: (params = {}) => {
+    const q = new URLSearchParams(params).toString()
+    return req(`/api/audit-logs${q ? `?${q}` : ''}`)
+  },
+  alertSettings: () => req('/api/settings/alerts'),
+  updateAlertSettings: (payload) => req('/api/settings/alerts', { method: 'PATCH', body: JSON.stringify(payload) }),
 
   agentTasks: () => req('/api/agent/tasks'),
   addAgentTask: (payload) => req('/api/agent/tasks', { method: 'POST', body: JSON.stringify(payload) }),

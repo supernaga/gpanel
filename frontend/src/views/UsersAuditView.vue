@@ -19,7 +19,23 @@
       </tbody>
     </table>
 
+    <h3 style="margin-top:18px">告警策略</h3>
+    <form class="inline-form" @submit.prevent="saveSettings" style="margin-bottom:10px">
+      <input v-model.number="settings.offlineMinutes" type="number" min="1" placeholder="离线阈值(分)" />
+      <input v-model.number="settings.dedupeMinutes" type="number" min="1" placeholder="去重窗口(分)" />
+      <input v-model.number="settings.taskTimeoutSeconds" type="number" min="10" placeholder="任务超时(秒)" />
+      <input v-model.number="settings.taskMaxRetries" type="number" min="0" placeholder="任务重试次数" />
+      <button type="submit">保存策略</button>
+    </form>
+
     <h3 style="margin-top:18px">审计日志</h3>
+    <form class="inline-form" @submit.prevent="load" style="margin-bottom:10px">
+      <input v-model="filters.userId" placeholder="userId" />
+      <input v-model="filters.action" placeholder="action" />
+      <input v-model="filters.from" placeholder="from(ISO时间)" />
+      <input v-model="filters.to" placeholder="to(ISO时间)" />
+      <button type="submit">筛选</button>
+    </form>
     <table>
       <thead><tr><th>ID</th><th>用户ID</th><th>动作</th><th>目标</th><th>详情</th><th>时间</th></tr></thead>
       <tbody>
@@ -36,8 +52,15 @@ import { onMounted, ref } from 'vue'
 import { api } from '../api/client'
 const users = ref([])
 const logs = ref([])
+const settings = ref({ offlineMinutes: 2, dedupeMinutes: 5, taskTimeoutSeconds: 300, taskMaxRetries: 3 })
+const filters = ref({ userId: '', action: '', from: '', to: '' })
 const userForm = ref({ username: '', password: '', role: 'viewer' })
-const load = async () => { users.value = await api.users(); logs.value = await api.auditLogs() }
+const load = async () => {
+  users.value = await api.users()
+  logs.value = await api.auditLogs(filters.value)
+  settings.value = await api.alertSettings()
+}
+const saveSettings = async () => { await api.updateAlertSettings(settings.value); await load() }
 const createUser = async () => { await api.addUser(userForm.value); userForm.value = { username: '', password: '', role: 'viewer' }; await load() }
 const toggleRole = async (u) => { await api.updateUser(u.id, { role: u.role === 'admin' ? 'viewer' : 'admin' }); await load() }
 onMounted(load)
