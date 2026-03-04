@@ -5,6 +5,7 @@ import (
 	"log"
 	"math/rand"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -32,17 +33,19 @@ type Node struct {
 }
 
 type Store struct {
-	mu    sync.RWMutex
-	nodes []Node
+	mu     sync.RWMutex
+	nodes  []Node
+	nextID int
 }
 
 func newStore() *Store {
 	now := time.Now()
-	return &Store{nodes: []Node{
+	seed := []Node{
 		{ID: 1, Name: "hk-edge-01", Region: "Hong Kong", Status: "online", LatencyMs: 28, Version: "gost v3.0.0", UpdatedAt: now},
 		{ID: 2, Name: "sg-core-01", Region: "Singapore", Status: "online", LatencyMs: 46, Version: "gost v3.0.0", UpdatedAt: now},
 		{ID: 3, Name: "tokyo-relay-02", Region: "Tokyo", Status: "offline", LatencyMs: 0, Version: "gost v3.0.0", UpdatedAt: now},
-	}}
+	}
+	return &Store{nodes: seed, nextID: len(seed) + 1}
 }
 
 func (s *Store) listNodes() []Node {
@@ -56,7 +59,8 @@ func (s *Store) listNodes() []Node {
 func (s *Store) addNode(n Node) Node {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	n.ID = len(s.nodes) + 1
+	n.ID = s.nextID
+	s.nextID++
 	n.Status = "online"
 	n.UpdatedAt = time.Now()
 	n.Version = "gost v3.0.0"
@@ -100,7 +104,26 @@ func (s *Store) summary() DashboardSummary {
 	}
 }
 
-var upgrader = websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
+func parseAllowedOrigins(env string) map[string]bool {
+	out := map[string]bool{}
+	for _, v := range strings.Split(env, ",") {
+		v = strings.TrimSpace(v)
+		if v != "" {
+			out[v] = true
+		}
+	}
+	return out
+}
+
+func originAllowed(origin string, allowAny bool, allowed map[string]bool) bool {
+	if allowAny {
+		return true
+	}
+	if origin == "" {
+		return false
+	}
+	return allowed[origin]
+}
 
 func writeJSON(w http.ResponseWriter, code int, v any) {
 	w.Header().Set("Content-Type", "application/json")
@@ -108,10 +131,14 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 
-func withCORS(next http.Handler) http.Handler {
+func withCORS(next http.Handler, allowAny bool, allowed map[string]bool) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+		origin := r.Header.Get("Origin")
+		if originAllowed(origin, allowAny, allowed) {
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+			w.Header().Set("Vary", "Origin")
+		}
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
 		w.Header().Set("Access-Control-Allow-Methods", "GET,POST,PATCH,OPTIONS")
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
@@ -125,6 +152,26 @@ func main() {
 	rand.Seed(time.Now().UnixNano())
 	store := newStore()
 	mux := http.NewServeMux()
+
+	corsEnv := strings.TrimSpace(os.Getenv("CORS_ALLOW_ORIGIN"))
+	if corsEnv == "" {
+		corsEnv = "*"
+	}
+	corsAllowAny := corsEnv == "*"
+	corsAllowed := parseAllowedOrigins(corsEnv)
+
+	wsEnv := strings.TrimSpace(os.Getenv("WS_ALLOW_ORIGIN"))
+	if wsEnv == "" {
+		wsEnv = "*"
+	}
+	wsAllowAny := wsEnv == "*"
+	wsAllowed := parseAllowedOrigins(wsEnv)
+
+	upgrader := websocket.Upgrader{
+		CheckOrigin: func(r *http.Request) bool {
+			return originAllowed(r.Header.Get("Origin"), wsAllowAny, wsAllowed)
+		},
+	}
 
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, map[string]string{"status": "ok"})
@@ -197,7 +244,8 @@ func main() {
 
 	addr := ":8080"
 	log.Printf("gost-panel backend listening on %s", addr)
-	if err := http.ListenAndServe(addr, withCORS(mux)); err != nil {
+	log.Printf("CORS_ALLOW_ORIGIN=%s WS_ALLOW_ORIGIN=%s", corsEnv, wsEnv)
+	if err := http.ListenAndServe(addr, withCORS(mux, corsAllowAny, corsAllowed)); err != nil {
 		log.Fatal(err)
 	}
 }
