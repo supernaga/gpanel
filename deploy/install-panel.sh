@@ -64,6 +64,7 @@ if [ $rc -ne 0 ]; then
   echo "[WARN] Pull-based deploy failed, fallback to local image build..."
   cd "$APP_DIR"
   IMAGE_PREFIX="local/gpanel"
+  docker pull postgres:16
   docker build -t ${IMAGE_PREFIX}-server:latest ./backend
   docker build -t ${IMAGE_PREFIX}-web:latest ./frontend
   docker build -t ${IMAGE_PREFIX}-agent:latest ./agent || true
