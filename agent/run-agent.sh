@@ -18,11 +18,10 @@ while true; do
   TASK_JSON=$(curl -fsS "$PANEL_URL/api/agent/tasks/next?nodeUid=$NODE_UID&nodeName=$NODE_NAME" -H "Authorization: Bearer $AGENT_TOKEN" || echo '{"task":null}')
   TASK_ID=$(echo "$TASK_JSON" | jq -r '.task.id // empty')
   if [ -n "$TASK_ID" ]; then
-    RESULT=$(jq -nc --arg node "$NODE_NAME" --arg at "$(date -Iseconds)" '{ok:true,node:$node,at:$at}')
     curl -fsS -X POST "$PANEL_URL/api/agent/tasks/$TASK_ID/ack" \
       -H "Authorization: Bearer $AGENT_TOKEN" \
       -H "Content-Type: application/json" \
-      -d "{\"status\":\"success\",\"result\":$(printf '%s' "$RESULT" | jq -Rs .)}" || true
+      -d '{"status":"success","result":"{}"}' || true
   fi
 
   sleep 15
