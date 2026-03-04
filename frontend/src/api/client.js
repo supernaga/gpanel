@@ -1,36 +1,41 @@
 const API_BASE = import.meta.env.VITE_API_BASE || 'http://localhost:8080'
 
-const j = (r) => r.json()
+const getToken = () => localStorage.getItem('gpanel_token') || ''
+
+const req = (path, options = {}) => {
+  const headers = { 'Content-Type': 'application/json', ...(options.headers || {}) }
+  const token = getToken()
+  if (token) headers.Authorization = `Bearer ${token}`
+  return fetch(`${API_BASE}${path}`, { ...options, headers }).then(async (r) => {
+    const data = await r.json().catch(() => ({}))
+    if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`)
+    return data
+  })
+}
 
 export const api = {
-  summary: () => fetch(`${API_BASE}/api/dashboard/summary`).then(j),
+  login: (payload) => req('/api/auth/login', { method: 'POST', body: JSON.stringify(payload), headers: {} }),
 
-  nodes: () => fetch(`${API_BASE}/api/nodes`).then(j),
-  addNode: (payload) => fetch(`${API_BASE}/api/nodes`, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload)
-  }).then(j),
-  toggleNode: (id) => fetch(`${API_BASE}/api/nodes/${id}/toggle`, { method: 'PATCH' }).then(j),
+  summary: () => req('/api/dashboard/summary'),
 
-  clients: () => fetch(`${API_BASE}/api/clients`).then(j),
-  addClient: (payload) => fetch(`${API_BASE}/api/clients`, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload)
-  }).then(j),
-  toggleClient: (id) => fetch(`${API_BASE}/api/clients/${id}/toggle`, { method: 'PATCH' }).then(j),
+  nodes: () => req('/api/nodes'),
+  addNode: (payload) => req('/api/nodes', { method: 'POST', body: JSON.stringify(payload) }),
+  toggleNode: (id) => req(`/api/nodes/${id}/toggle`, { method: 'PATCH' }),
 
-  forwards: () => fetch(`${API_BASE}/api/forwards`).then(j),
-  addForward: (payload) => fetch(`${API_BASE}/api/forwards`, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload)
-  }).then(j),
-  toggleForward: (id) => fetch(`${API_BASE}/api/forwards/${id}/toggle`, { method: 'PATCH' }).then(j),
+  clients: () => req('/api/clients'),
+  addClient: (payload) => req('/api/clients', { method: 'POST', body: JSON.stringify(payload) }),
+  toggleClient: (id) => req(`/api/clients/${id}/toggle`, { method: 'PATCH' }),
 
-  rules: () => fetch(`${API_BASE}/api/rules`).then(j),
-  addRule: (payload) => fetch(`${API_BASE}/api/rules`, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload)
-  }).then(j),
-  toggleRule: (id) => fetch(`${API_BASE}/api/rules/${id}/toggle`, { method: 'PATCH' }).then(j),
+  forwards: () => req('/api/forwards'),
+  addForward: (payload) => req('/api/forwards', { method: 'POST', body: JSON.stringify(payload) }),
+  toggleForward: (id) => req(`/api/forwards/${id}/toggle`, { method: 'PATCH' }),
 
-  alerts: () => fetch(`${API_BASE}/api/alerts`).then(j),
-  readAlert: (id) => fetch(`${API_BASE}/api/alerts/${id}/read`, { method: 'PATCH' }).then(j),
+  rules: () => req('/api/rules'),
+  addRule: (payload) => req('/api/rules', { method: 'POST', body: JSON.stringify(payload) }),
+  toggleRule: (id) => req(`/api/rules/${id}/toggle`, { method: 'PATCH' }),
 
-  wsUrl: () => `${API_BASE.replace('http', 'ws')}/ws/metrics`
+  alerts: () => req('/api/alerts'),
+  readAlert: (id) => req(`/api/alerts/${id}/read`, { method: 'PATCH' }),
+
+  wsUrl: () => `${API_BASE.replace('http', 'ws')}/ws/metrics?token=${encodeURIComponent(getToken())}`
 }

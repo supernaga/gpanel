@@ -11,11 +11,11 @@ command -v docker >/dev/null 2>&1 || curl -fsSL https://get.docker.com | sh
 
 mkdir -p "$APP_DIR"
 if [ ! -d "$APP_DIR/.git" ]; then
-git clone -b "$BRANCH" "$REPO_URL" "$APP_DIR"
+  git clone -b "$BRANCH" "$REPO_URL" "$APP_DIR"
 else
-cd "$APP_DIR"
-git fetch origin
-git reset --hard "origin/$BRANCH"
+  cd "$APP_DIR"
+  git fetch origin
+  git reset --hard "origin/$BRANCH"
 fi
 
 cd "$APP_DIR"
@@ -23,20 +23,28 @@ cd "$APP_DIR"
 POSTGRES_PASSWORD="${POSTGRES_PASSWORD:-$(rand)}"
 JWT_SECRET="${JWT_SECRET:-$(rand)}"
 AGENT_TOKEN="${AGENT_TOKEN:-$(rand)}"
+ADMIN_USER="${ADMIN_USER:-admin}"
+ADMIN_PASSWORD="${ADMIN_PASSWORD:-$(rand)}"
+WEBHOOK_URL="${WEBHOOK_URL:-}"
 IMAGE_PREFIX="${IMAGE_PREFIX:-ghcr.io/supernaga/gpanel}"
 
 cat > deploy/.env <<EOT
 POSTGRES_PASSWORD=$POSTGRES_PASSWORD
 JWT_SECRET=$JWT_SECRET
 AGENT_TOKEN=$AGENT_TOKEN
+ADMIN_USER=$ADMIN_USER
+ADMIN_PASSWORD=$ADMIN_PASSWORD
+WEBHOOK_URL=$WEBHOOK_URL
 IMAGE_PREFIX=$IMAGE_PREFIX
 EOT
 
 cd deploy
 docker compose up -d --build
 
-IP="$(hostname -I | awk "{print \$1}")"
+IP="$(hostname -I | awk '{print $1}')"
 echo ""
 echo "[OK] Panel started: http://$IP"
 echo "[INFO] Secrets saved in: $APP_DIR/deploy/.env"
 echo "[INFO] Agent token: $AGENT_TOKEN"
+echo "[INFO] Admin user: $ADMIN_USER"
+echo "[INFO] Admin password: $ADMIN_PASSWORD"

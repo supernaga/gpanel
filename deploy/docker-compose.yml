@@ -23,6 +23,9 @@ services:
       DB_DSN: postgres://gpanel:${POSTGRES_PASSWORD}@postgres:5432/gpanel?sslmode=disable
       JWT_SECRET: ${JWT_SECRET}
       AGENT_TOKEN: ${AGENT_TOKEN}
+      ADMIN_USER: ${ADMIN_USER}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD}
+      WEBHOOK_URL: ${WEBHOOK_URL}
     depends_on:
       postgres:
         condition: service_healthy

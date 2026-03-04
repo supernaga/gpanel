@@ -1,8 +1,20 @@
 # GPanel
 
-一个用于管理多节点的 Panel + Agent 项目（当前为 **MVP / 演示版后端**）。
+GOST 多节点管理面板（Panel）+ Agent 接入。
 
-## 一键安装 Panel（推荐）
+## 第二版（当前）能力
+
+- PostgreSQL 持久化（节点、客户端、转发、规则、告警、用户）
+- JWT 登录鉴权（`/api/auth/login`）
+- 角色权限（`admin` 可写，`viewer` 只读）
+- Agent 心跳接口（`/api/agent/heartbeat`，Bearer `AGENT_TOKEN`）
+- 基础告警引擎（节点离线 >2 分钟自动告警）
+- 可选 Webhook 告警转发（`WEBHOOK_URL`）
+- 前端模块：仪表盘 / 节点 / 客户端 / 端口转发 / 规则 / 告警
+
+---
+
+## 快速安装（推荐）
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/supernaga/gpanel/main/deploy/install-panel.sh | bash
@@ -12,9 +24,16 @@ curl -fsSL https://raw.githubusercontent.com/supernaga/gpanel/main/deploy/instal
 
 - `http://服务器IP`
 
-> 默认会自动生成随机 `POSTGRES_PASSWORD` / `JWT_SECRET` / `AGENT_TOKEN`，并写入 `deploy/.env`。
+安装脚本会输出：
 
-## 节点接入（安装 Agent）
+- Agent Token
+- Admin 用户名/密码
+
+> 重要：请妥善保存 `deploy/.env`。
+
+---
+
+## 节点接入
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/supernaga/gpanel/main/deploy/install-agent.sh | bash -s -- \
@@ -23,38 +42,28 @@ curl -fsSL https://raw.githubusercontent.com/supernaga/gpanel/main/deploy/instal
   --name node-01
 ```
 
-## 手动部署（Docker Compose）
+---
+
+## Docker 手动安装
 
 ```bash
 cd deploy
-cp .env.example .env   # 若没有可直接创建，参考下方环境变量说明
 docker compose up -d --build
 ```
 
-### 关键环境变量
-
-- `POSTGRES_PASSWORD`：PostgreSQL 密码（必须修改）
-- `JWT_SECRET`：JWT 签名密钥（必须修改）
-- `AGENT_TOKEN`：Agent 注册令牌（必须修改）
-- `IMAGE_PREFIX`：镜像前缀（默认 `ghcr.io/supernaga/gpanel`）
-- `CORS_ALLOW_ORIGIN`：后端 CORS 白名单（默认 `*`，生产建议改成前端域名）
-- `WS_ALLOW_ORIGIN`：WebSocket Origin 白名单（默认 `*`，生产建议改成前端域名）
-
-## 当前状态说明（重要）
-
-当前 `backend/main.go` 仍是演示型实现：
-
-- 节点数据为内存模拟，不持久化到 PostgreSQL
-- 未启用 JWT 鉴权流程
-
-`deploy` 目录已预留数据库与密钥配置，后续会逐步接入生产能力。
+---
 
 ## 安全建议（强烈）
 
-首次安装后请立即修改：
+首次安装后务必修改：
 
 - `POSTGRES_PASSWORD`
 - `JWT_SECRET`
 - `AGENT_TOKEN`
+- `ADMIN_PASSWORD`
 
-并避免长期使用默认/弱口令。
+并建议：
+
+- 用反向代理加 HTTPS
+- 限制 `8080/80` 来源 IP
+- 配置 `WEBHOOK_URL` 仅发往可信端点

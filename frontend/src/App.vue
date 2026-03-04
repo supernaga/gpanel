@@ -1,5 +1,18 @@
 <template>
-  <div class="layout">
+  <div v-if="!authed" class="login-wrap">
+    <section class="login-card">
+      <h2>GPanel 登录</h2>
+      <form @submit.prevent="doLogin" class="inline-form" style="display:flex;flex-direction:column;gap:8px">
+        <input v-model="login.username" placeholder="用户名" required />
+        <input v-model="login.password" placeholder="密码" type="password" required />
+        <button type="submit">登录</button>
+      </form>
+      <p class="hint">默认账号见 deploy/.env（ADMIN_USER / ADMIN_PASSWORD）</p>
+      <p v-if="err" class="danger">{{ err }}</p>
+    </section>
+  </div>
+
+  <div v-else class="layout">
     <aside class="sidebar">
       <h2>GOST 管理面板</h2>
       <button :class="{active:tab==='dashboard'}" @click="tab='dashboard'">仪表盘</button>
@@ -8,6 +21,7 @@
       <button :class="{active:tab==='forwards'}" @click="tab='forwards'">端口转发</button>
       <button :class="{active:tab==='rules'}" @click="tab='rules'">规则管理</button>
       <button :class="{active:tab==='alerts'}" @click="tab='alerts'">告警通知</button>
+      <button @click="logout">退出登录</button>
     </aside>
 
     <main class="content">
@@ -23,6 +37,7 @@
 
 <script setup>
 import { ref } from 'vue'
+import { api } from './api/client'
 import DashboardView from './views/DashboardView.vue'
 import NodesView from './views/NodesView.vue'
 import ClientsView from './views/ClientsView.vue'
@@ -31,4 +46,25 @@ import RulesView from './views/RulesView.vue'
 import AlertsView from './views/AlertsView.vue'
 
 const tab = ref('dashboard')
+const authed = ref(!!localStorage.getItem('gpanel_token'))
+const err = ref('')
+const login = ref({ username: 'admin', password: '' })
+
+const doLogin = async () => {
+  err.value = ''
+  try {
+    const res = await api.login(login.value)
+    localStorage.setItem('gpanel_token', res.token)
+    localStorage.setItem('gpanel_role', res.role)
+    authed.value = true
+  } catch (e) {
+    err.value = e.message || '登录失败'
+  }
+}
+
+const logout = () => {
+  localStorage.removeItem('gpanel_token')
+  localStorage.removeItem('gpanel_role')
+  authed.value = false
+}
 </script>
