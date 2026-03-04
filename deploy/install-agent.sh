@@ -45,7 +45,7 @@ while true; do
     curl -fsS -X POST "$PANEL_URL/api/agent/tasks/$ID/ack" \
       -H "Authorization: Bearer $AGENT_TOKEN" \
       -H "Content-Type: application/json" \
-      -d '{"status":"success","result":"{}"}' || true
+      -d "{\"status\":\"success\",\"result\":\"{}\"}" || true
   fi
   sleep 15
 done
