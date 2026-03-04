@@ -18,6 +18,14 @@ export const api = {
 
   summary: () => req('/api/dashboard/summary'),
 
+  users: () => req('/api/users'),
+  addUser: (payload) => req('/api/users', { method: 'POST', body: JSON.stringify(payload) }),
+  updateUser: (id, payload) => req(`/api/users/${id}/update`, { method: 'PATCH', body: JSON.stringify(payload) }),
+  auditLogs: () => req('/api/audit-logs'),
+
+  agentTasks: () => req('/api/agent/tasks'),
+  addAgentTask: (payload) => req('/api/agent/tasks', { method: 'POST', body: JSON.stringify(payload) }),
+
   nodes: () => req('/api/nodes'),
   addNode: (payload) => req('/api/nodes', { method: 'POST', body: JSON.stringify(payload) }),
   toggleNode: (id) => req(`/api/nodes/${id}/toggle`, { method: 'PATCH' }),

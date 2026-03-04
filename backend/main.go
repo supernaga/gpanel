@@ -20,6 +20,13 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
+type ctxKey string
+
+const (
+	ctxUserID   ctxKey = "uid"
+	ctxUserRole ctxKey = "role"
+)
+
 type App struct {
 	db         *sql.DB
 	jwtSecret  []byte
@@ -93,6 +100,35 @@ type Alert struct {
 	CreatedAt time.Time `json:"createdAt"`
 }
 
+type User struct {
+	ID        int64     `json:"id"`
+	Username  string    `json:"username"`
+	Role      string    `json:"role"`
+	CreatedAt time.Time `json:"createdAt"`
+}
+
+type AuditLog struct {
+	ID        int64     `json:"id"`
+	UserID    int64     `json:"userId"`
+	Action    string    `json:"action"`
+	Target    string    `json:"target"`
+	Detail    string    `json:"detail"`
+	CreatedAt time.Time `json:"createdAt"`
+}
+
+type AgentTask struct {
+	ID         int64      `json:"id"`
+	NodeUID    string     `json:"nodeUid"`
+	NodeName   string     `json:"nodeName"`
+	Command    string     `json:"command"`
+	Payload    string     `json:"payload"`
+	Status     string     `json:"status"`
+	Result     string     `json:"result"`
+	CreatedAt  time.Time  `json:"createdAt"`
+	Dispatched *time.Time `json:"dispatchedAt,omitempty"`
+	DoneAt     *time.Time `json:"doneAt,omitempty"`
+}
+
 var upgrader = websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
 
 func writeJSON(w http.ResponseWriter, code int, v any) {
@@ -133,7 +169,7 @@ CREATE TABLE IF NOT EXISTS users (
 );
 CREATE TABLE IF NOT EXISTS nodes (
   id BIGSERIAL PRIMARY KEY,
-  name TEXT NOT NULL,
+  name TEXT UNIQUE NOT NULL,
   region TEXT NOT NULL,
   status TEXT NOT NULL DEFAULT 'online',
   latency_ms INT NOT NULL DEFAULT 0,
@@ -187,6 +223,26 @@ CREATE TABLE IF NOT EXISTS agent_heartbeats (
   latency_ms INT NOT NULL DEFAULT 0,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   UNIQUE(node_uid)
+);
+CREATE TABLE IF NOT EXISTS audit_logs (
+  id BIGSERIAL PRIMARY KEY,
+  user_id BIGINT NOT NULL,
+  action TEXT NOT NULL,
+  target TEXT NOT NULL,
+  detail TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS agent_tasks (
+  id BIGSERIAL PRIMARY KEY,
+  node_uid TEXT NOT NULL DEFAULT '',
+  node_name TEXT NOT NULL DEFAULT '',
+  command TEXT NOT NULL,
+  payload TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'pending',
+  result TEXT NOT NULL DEFAULT '',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  dispatched_at TIMESTAMPTZ,
+  done_at TIMESTAMPTZ
 );`
 	_, err := a.db.ExecContext(ctx, schema)
 	if err != nil {
@@ -204,6 +260,8 @@ VALUES($1,$2,'admin') ON CONFLICT (username) DO NOTHING`, adminUser, string(hash
 	if err != nil {
 		return err
 	}
+	_, _ = a.db.ExecContext(ctx, `INSERT INTO users(username,password_hash,role)
+VALUES('viewer',$1,'viewer') ON CONFLICT (username) DO NOTHING`, string(hash))
 
 	var cnt int
 	if err := a.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM nodes`).Scan(&cnt); err != nil {
@@ -254,6 +312,19 @@ func (a *App) auth(next http.Handler) http.Handler {
 			writeJSON(w, http.StatusForbidden, map[string]string{"error": "viewer is read-only"})
 			return
 		}
+		ctx := context.WithValue(r.Context(), ctxUserID, claims.UserID)
+		ctx = context.WithValue(ctx, ctxUserRole, claims.Role)
+		next.ServeHTTP(w, r.WithContext(ctx))
+	})
+}
+
+func (a *App) requireAdmin(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		role, _ := r.Context().Value(ctxUserRole).(string)
+		if role != "admin" {
+			writeJSON(w, 403, map[string]string{"error": "admin only"})
+			return
+		}
 		next.ServeHTTP(w, r)
 	})
 }
@@ -269,7 +340,25 @@ func (a *App) agentAuth(next http.Handler) http.Handler {
 	})
 }
 
+func (a *App) uid(ctx context.Context) int64 {
+	v, _ := ctx.Value(ctxUserID).(int64)
+	return v
+}
+
+func (a *App) audit(ctx context.Context, action, target, detail string) {
+	uid := a.uid(ctx)
+	if uid == 0 {
+		return
+	}
+	_, _ = a.db.ExecContext(ctx, `INSERT INTO audit_logs(user_id,action,target,detail) VALUES($1,$2,$3,$4)`, uid, action, target, detail)
+}
+
 func (a *App) createAlert(ctx context.Context, level, source, msg string) {
+	var id int64
+	err := a.db.QueryRowContext(ctx, `SELECT id FROM alerts WHERE source=$1 AND message=$2 AND read=false AND created_at > now() - interval '5 minutes' ORDER BY id DESC LIMIT 1`, source, msg).Scan(&id)
+	if err == nil {
+		return
+	}
 	_, _ = a.db.ExecContext(ctx, `INSERT INTO alerts(level,source,message,read) VALUES($1,$2,$3,false)`, level, source, msg)
 	if a.webhookURL == "" {
 		return
@@ -287,15 +376,14 @@ func (a *App) runRuleEngine(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			rows, err := a.db.QueryContext(ctx, `SELECT id,name,updated_at FROM nodes WHERE status='offline'`)
+			rows, err := a.db.QueryContext(ctx, `SELECT name,updated_at FROM nodes WHERE status='offline'`)
 			if err != nil {
 				continue
 			}
 			for rows.Next() {
-				var id int64
 				var name string
 				var updated time.Time
-				if rows.Scan(&id, &name, &updated) == nil && time.Since(updated) > 2*time.Minute {
+				if rows.Scan(&name, &updated) == nil && time.Since(updated) > 2*time.Minute {
 					a.createAlert(ctx, "warn", fmt.Sprintf("node/%s", name), "Node offline > 2m")
 				}
 			}
@@ -310,6 +398,13 @@ func parseID(path, entity, action string) (int64, error) {
 		return 0, strconv.ErrSyntax
 	}
 	return strconv.ParseInt(parts[2], 10, 64)
+}
+
+func first(v, fallback string) string {
+	if strings.TrimSpace(v) == "" {
+		return fallback
+	}
+	return v
 }
 
 func main() {
@@ -390,8 +485,68 @@ ON CONFLICT (node_uid)
 DO UPDATE SET node_name=EXCLUDED.node_name,node_ip=EXCLUDED.node_ip,version=EXCLUDED.version,latency_ms=EXCLUDED.latency_ms,created_at=now()`, req.NodeName, req.NodeUID, req.NodeIP, req.Version, req.LatencyMs)
 		_, _ = app.db.Exec(`INSERT INTO nodes(name,region,status,latency_ms,version,updated_at)
 VALUES($1,$2,'online',$3,$4,now())
-ON CONFLICT DO NOTHING`, req.NodeName, first(req.Region, "Unknown"), req.LatencyMs, first(req.Version, "gost v3"))
-		_, _ = app.db.Exec(`UPDATE nodes SET status='online', latency_ms=$2, version=$3, updated_at=now() WHERE name=$1`, req.NodeName, req.LatencyMs, first(req.Version, "gost v3"))
+ON CONFLICT (name) DO UPDATE SET status='online',latency_ms=EXCLUDED.latency_ms,version=EXCLUDED.version,updated_at=now()`, req.NodeName, first(req.Region, "Unknown"), req.LatencyMs, first(req.Version, "gost v3"))
+		writeJSON(w, 200, map[string]any{"ok": true})
+	})))
+
+	mux.Handle("/api/agent/tasks/next", app.agentAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		nodeUID := strings.TrimSpace(r.URL.Query().Get("nodeUid"))
+		nodeName := strings.TrimSpace(r.URL.Query().Get("nodeName"))
+		if nodeUID == "" && nodeName == "" {
+			writeJSON(w, 400, map[string]string{"error": "nodeUid or nodeName required"})
+			return
+		}
+		tx, err := app.db.Begin()
+		if err != nil {
+			writeJSON(w, 500, map[string]string{"error": err.Error()})
+			return
+		}
+		defer tx.Rollback()
+		q := `SELECT id,node_uid,node_name,command,payload,status,result,created_at,dispatched_at,done_at FROM agent_tasks
+WHERE status='pending' AND (node_uid=$1 OR node_name=$2 OR (node_uid='' AND node_name=''))
+ORDER BY id LIMIT 1 FOR UPDATE SKIP LOCKED`
+		var t AgentTask
+		err = tx.QueryRow(q, nodeUID, nodeName).Scan(&t.ID, &t.NodeUID, &t.NodeName, &t.Command, &t.Payload, &t.Status, &t.Result, &t.CreatedAt, &t.Dispatched, &t.DoneAt)
+		if err == sql.ErrNoRows {
+			writeJSON(w, 200, map[string]any{"task": nil})
+			return
+		}
+		if err != nil {
+			writeJSON(w, 500, map[string]string{"error": err.Error()})
+			return
+		}
+		_, _ = tx.Exec(`UPDATE agent_tasks SET status='dispatched', dispatched_at=now() WHERE id=$1`, t.ID)
+		_ = tx.Commit()
+		t.Status = "dispatched"
+		now := time.Now()
+		t.Dispatched = &now
+		writeJSON(w, 200, map[string]any{"task": t})
+	})))
+
+	mux.Handle("/api/agent/tasks/", app.agentAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || !strings.HasSuffix(r.URL.Path, "/ack") {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+		if len(parts) != 5 || parts[0] != "api" || parts[1] != "agent" || parts[2] != "tasks" || parts[4] != "ack" {
+			writeJSON(w, 400, map[string]string{"error": "bad path"})
+			return
+		}
+		id, err := strconv.ParseInt(parts[3], 10, 64)
+		if err != nil {
+			writeJSON(w, 400, map[string]string{"error": "invalid id"})
+			return
+		}
+		var req struct {
+			Status string `json:"status"`
+			Result string `json:"result"`
+		}
+		if json.NewDecoder(r.Body).Decode(&req) != nil || req.Status == "" {
+			writeJSON(w, 400, map[string]string{"error": "invalid payload"})
+			return
+		}
+		_, _ = app.db.Exec(`UPDATE agent_tasks SET status=$2,result=$3,done_at=now() WHERE id=$1`, id, req.Status, req.Result)
 		writeJSON(w, 200, map[string]any{"ok": true})
 	})))
 
@@ -406,11 +561,129 @@ ON CONFLICT DO NOTHING`, req.NodeName, first(req.Region, "Unknown"), req.Latency
 		writeJSON(w, 200, s)
 	})
 
+	api.HandleFunc("/api/users", func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			rows, _ := app.db.Query(`SELECT id,username,role,created_at FROM users ORDER BY id`)
+			defer rows.Close()
+			out := []User{}
+			for rows.Next() {
+				var u User
+				_ = rows.Scan(&u.ID, &u.Username, &u.Role, &u.CreatedAt)
+				out = append(out, u)
+			}
+			writeJSON(w, 200, out)
+		case http.MethodPost:
+			var req struct {
+				Username string `json:"username"`
+				Password string `json:"password"`
+				Role     string `json:"role"`
+			}
+			if json.NewDecoder(r.Body).Decode(&req) != nil || req.Username == "" || req.Password == "" || (req.Role != "admin" && req.Role != "viewer") {
+				writeJSON(w, 400, map[string]string{"error": "invalid payload"})
+				return
+			}
+			hash, _ := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
+			var u User
+			err := app.db.QueryRow(`INSERT INTO users(username,password_hash,role) VALUES($1,$2,$3) RETURNING id,username,role,created_at`, req.Username, string(hash), req.Role).
+				Scan(&u.ID, &u.Username, &u.Role, &u.CreatedAt)
+			if err != nil {
+				writeJSON(w, 500, map[string]string{"error": err.Error()})
+				return
+			}
+			app.audit(r.Context(), "user.create", fmt.Sprintf("user/%s", u.Username), "created")
+			writeJSON(w, 201, u)
+		default:
+			w.WriteHeader(http.StatusMethodNotAllowed)
+		}
+	})
+
+	api.HandleFunc("/api/users/", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPatch {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		id, err := parseID(r.URL.Path, "users", "update")
+		if err != nil {
+			writeJSON(w, 400, map[string]string{"error": "bad path, expected /api/users/{id}/update"})
+			return
+		}
+		var req struct {
+			Role     string `json:"role"`
+			Password string `json:"password"`
+		}
+		if json.NewDecoder(r.Body).Decode(&req) != nil {
+			writeJSON(w, 400, map[string]string{"error": "invalid payload"})
+			return
+		}
+		if req.Role != "" {
+			_, _ = app.db.Exec(`UPDATE users SET role=$2 WHERE id=$1`, id, req.Role)
+		}
+		if req.Password != "" {
+			hash, _ := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
+			_, _ = app.db.Exec(`UPDATE users SET password_hash=$2 WHERE id=$1`, id, string(hash))
+		}
+		app.audit(r.Context(), "user.update", fmt.Sprintf("user/%d", id), "role/password updated")
+		writeJSON(w, 200, map[string]any{"ok": true})
+	})
+
+	api.HandleFunc("/api/audit-logs", func(w http.ResponseWriter, r *http.Request) {
+		rows, _ := app.db.Query(`SELECT id,user_id,action,target,detail,created_at FROM audit_logs ORDER BY id DESC LIMIT 200`)
+		defer rows.Close()
+		out := []AuditLog{}
+		for rows.Next() {
+			var x AuditLog
+			_ = rows.Scan(&x.ID, &x.UserID, &x.Action, &x.Target, &x.Detail, &x.CreatedAt)
+			out = append(out, x)
+		}
+		writeJSON(w, 200, out)
+	})
+
+	api.HandleFunc("/api/agent/tasks", func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			rows, _ := app.db.Query(`SELECT id,node_uid,node_name,command,payload,status,result,created_at,dispatched_at,done_at FROM agent_tasks ORDER BY id DESC LIMIT 200`)
+			defer rows.Close()
+			out := []AgentTask{}
+			for rows.Next() {
+				var t AgentTask
+				_ = rows.Scan(&t.ID, &t.NodeUID, &t.NodeName, &t.Command, &t.Payload, &t.Status, &t.Result, &t.CreatedAt, &t.Dispatched, &t.DoneAt)
+				out = append(out, t)
+			}
+			writeJSON(w, 200, out)
+		case http.MethodPost:
+			var req struct {
+				NodeUID  string `json:"nodeUid"`
+				NodeName string `json:"nodeName"`
+				Command  string `json:"command"`
+				Payload  string `json:"payload"`
+			}
+			if json.NewDecoder(r.Body).Decode(&req) != nil || req.Command == "" {
+				writeJSON(w, 400, map[string]string{"error": "invalid payload"})
+				return
+			}
+			var t AgentTask
+			err := app.db.QueryRow(`INSERT INTO agent_tasks(node_uid,node_name,command,payload,status) VALUES($1,$2,$3,$4,'pending') RETURNING id,node_uid,node_name,command,payload,status,result,created_at,dispatched_at,done_at`, req.NodeUID, req.NodeName, req.Command, req.Payload).
+				Scan(&t.ID, &t.NodeUID, &t.NodeName, &t.Command, &t.Payload, &t.Status, &t.Result, &t.CreatedAt, &t.Dispatched, &t.DoneAt)
+			if err != nil {
+				writeJSON(w, 500, map[string]string{"error": err.Error()})
+				return
+			}
+			app.audit(r.Context(), "agent.task.create", fmt.Sprintf("task/%d", t.ID), t.Command)
+			writeJSON(w, 201, t)
+		default:
+			w.WriteHeader(http.StatusMethodNotAllowed)
+		}
+	})
+
 	api.HandleFunc("/api/nodes", func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodGet:
 			rows, err := app.db.Query(`SELECT id,name,region,status,latency_ms,version,updated_at FROM nodes ORDER BY id`)
-			if err != nil { writeJSON(w, 500, map[string]string{"error": err.Error()}); return }
+			if err != nil {
+				writeJSON(w, 500, map[string]string{"error": err.Error()})
+				return
+			}
 			defer rows.Close()
 			out := []Node{}
 			for rows.Next() {
@@ -421,24 +694,41 @@ ON CONFLICT DO NOTHING`, req.NodeName, first(req.Region, "Unknown"), req.Latency
 			writeJSON(w, 200, out)
 		case http.MethodPost:
 			var req struct{ Name, Region string }
-			if json.NewDecoder(r.Body).Decode(&req) != nil || req.Name == "" || req.Region == "" { writeJSON(w, 400, map[string]string{"error": "invalid payload"}); return }
+			if json.NewDecoder(r.Body).Decode(&req) != nil || req.Name == "" || req.Region == "" {
+				writeJSON(w, 400, map[string]string{"error": "invalid payload"})
+				return
+			}
 			var n Node
 			err := app.db.QueryRow(`INSERT INTO nodes(name,region,status,latency_ms,version,updated_at) VALUES($1,$2,'online',$3,'gost v3.0.0',now()) RETURNING id,name,region,status,latency_ms,version,updated_at`, req.Name, req.Region, rand.Intn(70)+20).
 				Scan(&n.ID, &n.Name, &n.Region, &n.Status, &n.LatencyMs, &n.Version, &n.UpdatedAt)
-			if err != nil { writeJSON(w, 500, map[string]string{"error": err.Error()}); return }
+			if err != nil {
+				writeJSON(w, 500, map[string]string{"error": err.Error()})
+				return
+			}
+			app.audit(r.Context(), "node.create", fmt.Sprintf("node/%d", n.ID), n.Name)
 			writeJSON(w, 201, n)
 		default:
 			w.WriteHeader(http.StatusMethodNotAllowed)
 		}
 	})
 	api.HandleFunc("/api/nodes/", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPatch { w.WriteHeader(http.StatusMethodNotAllowed); return }
+		if r.Method != http.MethodPatch {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
 		id, err := parseID(r.URL.Path, "nodes", "toggle")
-		if err != nil { writeJSON(w, 400, map[string]string{"error": "bad path"}); return }
+		if err != nil {
+			writeJSON(w, 400, map[string]string{"error": "bad path"})
+			return
+		}
 		_, _ = app.db.Exec(`UPDATE nodes SET status=CASE WHEN status='online' THEN 'offline' ELSE 'online' END, latency_ms=CASE WHEN status='online' THEN 0 ELSE $2 END, updated_at=now() WHERE id=$1`, id, rand.Intn(70)+20)
 		var n Node
 		err = app.db.QueryRow(`SELECT id,name,region,status,latency_ms,version,updated_at FROM nodes WHERE id=$1`, id).Scan(&n.ID, &n.Name, &n.Region, &n.Status, &n.LatencyMs, &n.Version, &n.UpdatedAt)
-		if err != nil { writeJSON(w, 404, map[string]string{"error": "node not found"}); return }
+		if err != nil {
+			writeJSON(w, 404, map[string]string{"error": "node not found"})
+			return
+		}
+		app.audit(r.Context(), "node.toggle", fmt.Sprintf("node/%d", n.ID), n.Status)
 		writeJSON(w, 200, n)
 	})
 
@@ -448,106 +738,194 @@ ON CONFLICT DO NOTHING`, req.NodeName, first(req.Region, "Unknown"), req.Latency
 			rows, _ := app.db.Query(`SELECT id,name,protocol,node_id,status,rx_mb,tx_mb,updated_at FROM clients ORDER BY id`)
 			defer rows.Close()
 			out := []Client{}
-			for rows.Next() { var c Client; _ = rows.Scan(&c.ID,&c.Name,&c.Protocol,&c.NodeID,&c.Status,&c.RxMB,&c.TxMB,&c.UpdatedAt); out = append(out,c) }
+			for rows.Next() {
+				var c Client
+				_ = rows.Scan(&c.ID, &c.Name, &c.Protocol, &c.NodeID, &c.Status, &c.RxMB, &c.TxMB, &c.UpdatedAt)
+				out = append(out, c)
+			}
 			writeJSON(w, 200, out)
 		case http.MethodPost:
 			var req struct{ Name, Protocol string; NodeID int64 }
-			if json.NewDecoder(r.Body).Decode(&req) != nil || req.Name=="" || req.Protocol=="" || req.NodeID <= 0 { writeJSON(w,400,map[string]string{"error":"invalid payload"}); return }
+			if json.NewDecoder(r.Body).Decode(&req) != nil || req.Name == "" || req.Protocol == "" || req.NodeID <= 0 {
+				writeJSON(w, 400, map[string]string{"error": "invalid payload"})
+				return
+			}
 			var c Client
-			err := app.db.QueryRow(`INSERT INTO clients(name,protocol,node_id,status,rx_mb,tx_mb,updated_at) VALUES($1,$2,$3,'online',$4,$5,now()) RETURNING id,name,protocol,node_id,status,rx_mb,tx_mb,updated_at`, req.Name, req.Protocol, req.NodeID, rand.Float64()*2000, rand.Float64()*1200).Scan(&c.ID,&c.Name,&c.Protocol,&c.NodeID,&c.Status,&c.RxMB,&c.TxMB,&c.UpdatedAt)
-			if err != nil { writeJSON(w,500,map[string]string{"error":err.Error()}); return }
-			writeJSON(w,201,c)
-		default: w.WriteHeader(http.StatusMethodNotAllowed)
+			err := app.db.QueryRow(`INSERT INTO clients(name,protocol,node_id,status,rx_mb,tx_mb,updated_at) VALUES($1,$2,$3,'online',$4,$5,now()) RETURNING id,name,protocol,node_id,status,rx_mb,tx_mb,updated_at`, req.Name, req.Protocol, req.NodeID, rand.Float64()*2000, rand.Float64()*1200).Scan(&c.ID, &c.Name, &c.Protocol, &c.NodeID, &c.Status, &c.RxMB, &c.TxMB, &c.UpdatedAt)
+			if err != nil {
+				writeJSON(w, 500, map[string]string{"error": err.Error()})
+				return
+			}
+			app.audit(r.Context(), "client.create", fmt.Sprintf("client/%d", c.ID), c.Name)
+			writeJSON(w, 201, c)
+		default:
+			w.WriteHeader(http.StatusMethodNotAllowed)
 		}
 	})
 	api.HandleFunc("/api/clients/", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPatch { w.WriteHeader(http.StatusMethodNotAllowed); return }
+		if r.Method != http.MethodPatch {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
 		id, err := parseID(r.URL.Path, "clients", "toggle")
-		if err != nil { writeJSON(w,400,map[string]string{"error":"bad path"}); return }
+		if err != nil {
+			writeJSON(w, 400, map[string]string{"error": "bad path"})
+			return
+		}
 		_, _ = app.db.Exec(`UPDATE clients SET status=CASE WHEN status='online' THEN 'offline' ELSE 'online' END, updated_at=now() WHERE id=$1`, id)
 		var c Client
-		err = app.db.QueryRow(`SELECT id,name,protocol,node_id,status,rx_mb,tx_mb,updated_at FROM clients WHERE id=$1`, id).Scan(&c.ID,&c.Name,&c.Protocol,&c.NodeID,&c.Status,&c.RxMB,&c.TxMB,&c.UpdatedAt)
-		if err != nil { writeJSON(w,404,map[string]string{"error":"client not found"}); return }
-		writeJSON(w,200,c)
+		err = app.db.QueryRow(`SELECT id,name,protocol,node_id,status,rx_mb,tx_mb,updated_at FROM clients WHERE id=$1`, id).Scan(&c.ID, &c.Name, &c.Protocol, &c.NodeID, &c.Status, &c.RxMB, &c.TxMB, &c.UpdatedAt)
+		if err != nil {
+			writeJSON(w, 404, map[string]string{"error": "client not found"})
+			return
+		}
+		app.audit(r.Context(), "client.toggle", fmt.Sprintf("client/%d", c.ID), c.Status)
+		writeJSON(w, 200, c)
 	})
 
 	api.HandleFunc("/api/forwards", func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodGet:
-			rows,_ := app.db.Query(`SELECT id,name,listen_addr,target_addr,protocol,status,node_id,connections,updated_at FROM forwards ORDER BY id`)
-			defer rows.Close(); out:=[]ForwardRule{}
-			for rows.Next(){var f ForwardRule; _=rows.Scan(&f.ID,&f.Name,&f.ListenAddr,&f.TargetAddr,&f.Protocol,&f.Status,&f.NodeID,&f.Connections,&f.UpdatedAt); out=append(out,f)}
-			writeJSON(w,200,out)
+			rows, _ := app.db.Query(`SELECT id,name,listen_addr,target_addr,protocol,status,node_id,connections,updated_at FROM forwards ORDER BY id`)
+			defer rows.Close()
+			out := []ForwardRule{}
+			for rows.Next() {
+				var f ForwardRule
+				_ = rows.Scan(&f.ID, &f.Name, &f.ListenAddr, &f.TargetAddr, &f.Protocol, &f.Status, &f.NodeID, &f.Connections, &f.UpdatedAt)
+				out = append(out, f)
+			}
+			writeJSON(w, 200, out)
 		case http.MethodPost:
 			var req struct{ Name, ListenAddr, TargetAddr, Protocol string; NodeID int64 }
-			if json.NewDecoder(r.Body).Decode(&req)!=nil || req.Name==""||req.ListenAddr==""||req.TargetAddr==""||req.Protocol==""||req.NodeID<=0 { writeJSON(w,400,map[string]string{"error":"invalid payload"}); return }
+			if json.NewDecoder(r.Body).Decode(&req) != nil || req.Name == "" || req.ListenAddr == "" || req.TargetAddr == "" || req.Protocol == "" || req.NodeID <= 0 {
+				writeJSON(w, 400, map[string]string{"error": "invalid payload"})
+				return
+			}
 			var f ForwardRule
-			err:=app.db.QueryRow(`INSERT INTO forwards(name,listen_addr,target_addr,protocol,status,node_id,connections,updated_at) VALUES($1,$2,$3,$4,'enabled',$5,$6,now()) RETURNING id,name,listen_addr,target_addr,protocol,status,node_id,connections,updated_at`, req.Name,req.ListenAddr,req.TargetAddr,req.Protocol,req.NodeID,rand.Intn(10)).Scan(&f.ID,&f.Name,&f.ListenAddr,&f.TargetAddr,&f.Protocol,&f.Status,&f.NodeID,&f.Connections,&f.UpdatedAt)
-			if err!=nil { writeJSON(w,500,map[string]string{"error":err.Error()}); return }
-			writeJSON(w,201,f)
-		default: w.WriteHeader(http.StatusMethodNotAllowed)
+			err := app.db.QueryRow(`INSERT INTO forwards(name,listen_addr,target_addr,protocol,status,node_id,connections,updated_at) VALUES($1,$2,$3,$4,'enabled',$5,$6,now()) RETURNING id,name,listen_addr,target_addr,protocol,status,node_id,connections,updated_at`, req.Name, req.ListenAddr, req.TargetAddr, req.Protocol, req.NodeID, rand.Intn(10)).Scan(&f.ID, &f.Name, &f.ListenAddr, &f.TargetAddr, &f.Protocol, &f.Status, &f.NodeID, &f.Connections, &f.UpdatedAt)
+			if err != nil {
+				writeJSON(w, 500, map[string]string{"error": err.Error()})
+				return
+			}
+			app.audit(r.Context(), "forward.create", fmt.Sprintf("forward/%d", f.ID), f.Name)
+			writeJSON(w, 201, f)
+		default:
+			w.WriteHeader(http.StatusMethodNotAllowed)
 		}
 	})
 	api.HandleFunc("/api/forwards/", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPatch { w.WriteHeader(http.StatusMethodNotAllowed); return }
+		if r.Method != http.MethodPatch {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
 		id, err := parseID(r.URL.Path, "forwards", "toggle")
-		if err != nil { writeJSON(w,400,map[string]string{"error":"bad path"}); return }
+		if err != nil {
+			writeJSON(w, 400, map[string]string{"error": "bad path"})
+			return
+		}
 		_, _ = app.db.Exec(`UPDATE forwards SET status=CASE WHEN status='enabled' THEN 'disabled' ELSE 'enabled' END, updated_at=now() WHERE id=$1`, id)
 		var f ForwardRule
-		err = app.db.QueryRow(`SELECT id,name,listen_addr,target_addr,protocol,status,node_id,connections,updated_at FROM forwards WHERE id=$1`, id).Scan(&f.ID,&f.Name,&f.ListenAddr,&f.TargetAddr,&f.Protocol,&f.Status,&f.NodeID,&f.Connections,&f.UpdatedAt)
-		if err != nil { writeJSON(w,404,map[string]string{"error":"forward not found"}); return }
-		writeJSON(w,200,f)
+		err = app.db.QueryRow(`SELECT id,name,listen_addr,target_addr,protocol,status,node_id,connections,updated_at FROM forwards WHERE id=$1`, id).Scan(&f.ID, &f.Name, &f.ListenAddr, &f.TargetAddr, &f.Protocol, &f.Status, &f.NodeID, &f.Connections, &f.UpdatedAt)
+		if err != nil {
+			writeJSON(w, 404, map[string]string{"error": "forward not found"})
+			return
+		}
+		app.audit(r.Context(), "forward.toggle", fmt.Sprintf("forward/%d", f.ID), f.Status)
+		writeJSON(w, 200, f)
 	})
 
 	api.HandleFunc("/api/rules", func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodGet:
-			rows,_:=app.db.Query(`SELECT id,name,action,expr,priority,enabled,updated_at FROM rules ORDER BY priority DESC,id DESC`)
-			defer rows.Close(); out:=[]TrafficRule{}
-			for rows.Next(){var x TrafficRule; _=rows.Scan(&x.ID,&x.Name,&x.Action,&x.Expr,&x.Priority,&x.Enabled,&x.UpdatedAt); out=append(out,x)}
-			writeJSON(w,200,out)
+			rows, _ := app.db.Query(`SELECT id,name,action,expr,priority,enabled,updated_at FROM rules ORDER BY priority DESC,id DESC`)
+			defer rows.Close()
+			out := []TrafficRule{}
+			for rows.Next() {
+				var x TrafficRule
+				_ = rows.Scan(&x.ID, &x.Name, &x.Action, &x.Expr, &x.Priority, &x.Enabled, &x.UpdatedAt)
+				out = append(out, x)
+			}
+			writeJSON(w, 200, out)
 		case http.MethodPost:
-			var req struct{Name,Action,Expr string; Priority int}
-			if json.NewDecoder(r.Body).Decode(&req)!=nil || req.Name=="" || req.Action=="" || req.Expr=="" { writeJSON(w,400,map[string]string{"error":"invalid payload"}); return }
+			var req struct{ Name, Action, Expr string; Priority int }
+			if json.NewDecoder(r.Body).Decode(&req) != nil || req.Name == "" || req.Action == "" || req.Expr == "" {
+				writeJSON(w, 400, map[string]string{"error": "invalid payload"})
+				return
+			}
 			var x TrafficRule
-			err:=app.db.QueryRow(`INSERT INTO rules(name,action,expr,priority,enabled,updated_at) VALUES($1,$2,$3,$4,true,now()) RETURNING id,name,action,expr,priority,enabled,updated_at`, req.Name,req.Action,req.Expr,req.Priority).Scan(&x.ID,&x.Name,&x.Action,&x.Expr,&x.Priority,&x.Enabled,&x.UpdatedAt)
-			if err!=nil { writeJSON(w,500,map[string]string{"error":err.Error()}); return }
-			writeJSON(w,201,x)
-		default:w.WriteHeader(http.StatusMethodNotAllowed)
+			err := app.db.QueryRow(`INSERT INTO rules(name,action,expr,priority,enabled,updated_at) VALUES($1,$2,$3,$4,true,now()) RETURNING id,name,action,expr,priority,enabled,updated_at`, req.Name, req.Action, req.Expr, req.Priority).Scan(&x.ID, &x.Name, &x.Action, &x.Expr, &x.Priority, &x.Enabled, &x.UpdatedAt)
+			if err != nil {
+				writeJSON(w, 500, map[string]string{"error": err.Error()})
+				return
+			}
+			app.audit(r.Context(), "rule.create", fmt.Sprintf("rule/%d", x.ID), x.Name)
+			writeJSON(w, 201, x)
+		default:
+			w.WriteHeader(http.StatusMethodNotAllowed)
 		}
 	})
 	api.HandleFunc("/api/rules/", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPatch { w.WriteHeader(http.StatusMethodNotAllowed); return }
+		if r.Method != http.MethodPatch {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
 		id, err := parseID(r.URL.Path, "rules", "toggle")
-		if err != nil { writeJSON(w,400,map[string]string{"error":"bad path"}); return }
+		if err != nil {
+			writeJSON(w, 400, map[string]string{"error": "bad path"})
+			return
+		}
 		_, _ = app.db.Exec(`UPDATE rules SET enabled = NOT enabled, updated_at=now() WHERE id=$1`, id)
 		var x TrafficRule
-		err = app.db.QueryRow(`SELECT id,name,action,expr,priority,enabled,updated_at FROM rules WHERE id=$1`, id).Scan(&x.ID,&x.Name,&x.Action,&x.Expr,&x.Priority,&x.Enabled,&x.UpdatedAt)
-		if err != nil { writeJSON(w,404,map[string]string{"error":"rule not found"}); return }
-		writeJSON(w,200,x)
+		err = app.db.QueryRow(`SELECT id,name,action,expr,priority,enabled,updated_at FROM rules WHERE id=$1`, id).Scan(&x.ID, &x.Name, &x.Action, &x.Expr, &x.Priority, &x.Enabled, &x.UpdatedAt)
+		if err != nil {
+			writeJSON(w, 404, map[string]string{"error": "rule not found"})
+			return
+		}
+		app.audit(r.Context(), "rule.toggle", fmt.Sprintf("rule/%d", x.ID), fmt.Sprintf("enabled=%v", x.Enabled))
+		writeJSON(w, 200, x)
 	})
 
 	api.HandleFunc("/api/alerts", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet { w.WriteHeader(http.StatusMethodNotAllowed); return }
-		rows,_:=app.db.Query(`SELECT id,level,source,message,read,created_at FROM alerts ORDER BY id DESC LIMIT 200`)
-		defer rows.Close(); out:=[]Alert{}
-		for rows.Next(){var a Alert; _=rows.Scan(&a.ID,&a.Level,&a.Source,&a.Message,&a.Read,&a.CreatedAt); out=append(out,a)}
-		writeJSON(w,200,out)
+		if r.Method != http.MethodGet {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		rows, _ := app.db.Query(`SELECT id,level,source,message,read,created_at FROM alerts ORDER BY id DESC LIMIT 200`)
+		defer rows.Close()
+		out := []Alert{}
+		for rows.Next() {
+			var a Alert
+			_ = rows.Scan(&a.ID, &a.Level, &a.Source, &a.Message, &a.Read, &a.CreatedAt)
+			out = append(out, a)
+		}
+		writeJSON(w, 200, out)
 	})
 	api.HandleFunc("/api/alerts/", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPatch { w.WriteHeader(http.StatusMethodNotAllowed); return }
+		if r.Method != http.MethodPatch {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
 		id, err := parseID(r.URL.Path, "alerts", "read")
-		if err != nil { writeJSON(w,400,map[string]string{"error":"bad path"}); return }
+		if err != nil {
+			writeJSON(w, 400, map[string]string{"error": "bad path"})
+			return
+		}
 		_, _ = app.db.Exec(`UPDATE alerts SET read=true WHERE id=$1`, id)
 		var a Alert
-		err = app.db.QueryRow(`SELECT id,level,source,message,read,created_at FROM alerts WHERE id=$1`, id).Scan(&a.ID,&a.Level,&a.Source,&a.Message,&a.Read,&a.CreatedAt)
-		if err != nil { writeJSON(w,404,map[string]string{"error":"alert not found"}); return }
-		writeJSON(w,200,a)
+		err = app.db.QueryRow(`SELECT id,level,source,message,read,created_at FROM alerts WHERE id=$1`, id).Scan(&a.ID, &a.Level, &a.Source, &a.Message, &a.Read, &a.CreatedAt)
+		if err != nil {
+			writeJSON(w, 404, map[string]string{"error": "alert not found"})
+			return
+		}
+		app.audit(r.Context(), "alert.read", fmt.Sprintf("alert/%d", id), "read")
+		writeJSON(w, 200, a)
 	})
 
 	api.HandleFunc("/ws/metrics", func(w http.ResponseWriter, r *http.Request) {
 		conn, err := upgrader.Upgrade(w, r, nil)
-		if err != nil { return }
+		if err != nil {
+			return
+		}
 		defer conn.Close()
 		ticker := time.NewTicker(2 * time.Second)
 		defer ticker.Stop()
@@ -557,10 +935,16 @@ ON CONFLICT DO NOTHING`, req.NodeName, first(req.Region, "Unknown"), req.Latency
 			_ = app.db.QueryRow(`SELECT COUNT(*) FILTER (WHERE status='online') FROM clients`).Scan(&s.ActiveClients)
 			_ = app.db.QueryRow(`SELECT COUNT(*) FILTER (WHERE read=false) FROM alerts`).Scan(&s.Alerts)
 			s.CurrentTraffic = float64(rand.Intn(700)+150) / 10
-			if conn.WriteJSON(s) != nil { return }
+			if conn.WriteJSON(s) != nil {
+				return
+			}
 		}
 	})
 
+	mux.Handle("/api/users", app.auth(app.requireAdmin(api)))
+	mux.Handle("/api/users/", app.auth(app.requireAdmin(api)))
+	mux.Handle("/api/audit-logs", app.auth(app.requireAdmin(api)))
+	mux.Handle("/api/agent/tasks", app.auth(app.requireAdmin(api)))
 	mux.Handle("/api/", app.auth(api))
 
 	addr := ":" + port
@@ -568,11 +952,4 @@ ON CONFLICT DO NOTHING`, req.NodeName, first(req.Region, "Unknown"), req.Latency
 	if err := http.ListenAndServe(addr, withCORS(mux)); err != nil {
 		log.Fatal(err)
 	}
-}
-
-func first(v, fallback string) string {
-	if strings.TrimSpace(v) == "" {
-		return fallback
-	}
-	return v
 }

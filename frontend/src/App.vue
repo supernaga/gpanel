@@ -21,6 +21,8 @@
       <button :class="{active:tab==='forwards'}" @click="tab='forwards'">端口转发</button>
       <button :class="{active:tab==='rules'}" @click="tab='rules'">规则管理</button>
       <button :class="{active:tab==='alerts'}" @click="tab='alerts'">告警通知</button>
+      <button v-if="isAdmin" :class="{active:tab==='tasks'}" @click="tab='tasks'">Agent任务</button>
+      <button v-if="isAdmin" :class="{active:tab==='users'}" @click="tab='users'">用户与审计</button>
       <button @click="logout">退出登录</button>
     </aside>
 
@@ -30,13 +32,15 @@
       <ClientsView v-else-if="tab==='clients'" />
       <ForwardsView v-else-if="tab==='forwards'" />
       <RulesView v-else-if="tab==='rules'" />
-      <AlertsView v-else />
+      <AlertsView v-else-if="tab==='alerts'" />
+      <AgentTasksView v-else-if="tab==='tasks'" />
+      <UsersAuditView v-else />
     </main>
   </div>
 </template>
 
 <script setup>
-import { ref } from 'vue'
+import { computed, ref } from 'vue'
 import { api } from './api/client'
 import DashboardView from './views/DashboardView.vue'
 import NodesView from './views/NodesView.vue'
@@ -44,11 +48,14 @@ import ClientsView from './views/ClientsView.vue'
 import ForwardsView from './views/ForwardsView.vue'
 import RulesView from './views/RulesView.vue'
 import AlertsView from './views/AlertsView.vue'
+import AgentTasksView from './views/AgentTasksView.vue'
+import UsersAuditView from './views/UsersAuditView.vue'
 
 const tab = ref('dashboard')
 const authed = ref(!!localStorage.getItem('gpanel_token'))
 const err = ref('')
 const login = ref({ username: 'admin', password: '' })
+const isAdmin = computed(() => (localStorage.getItem('gpanel_role') || '') === 'admin')
 
 const doLogin = async () => {
   err.value = ''

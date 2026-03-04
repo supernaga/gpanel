@@ -8,9 +8,12 @@ GOST 多节点管理面板（Panel）+ Agent 接入。
 - JWT 登录鉴权（`/api/auth/login`）
 - 角色权限（`admin` 可写，`viewer` 只读）
 - Agent 心跳接口（`/api/agent/heartbeat`，Bearer `AGENT_TOKEN`）
-- 基础告警引擎（节点离线 >2 分钟自动告警）
+- 基础告警引擎（节点离线 >2 分钟自动告警）+ 5 分钟去重抑制
 - 可选 Webhook 告警转发（`WEBHOOK_URL`）
-- 前端模块：仪表盘 / 节点 / 客户端 / 端口转发 / 规则 / 告警
+- Agent 任务通道（管理端下发任务，Agent 拉取并回执）
+- 审计日志（关键写操作记录）
+- RBAC 用户管理（admin/viewer，支持新增与角色切换）
+- 前端模块：仪表盘 / 节点 / 客户端 / 端口转发 / 规则 / 告警 / Agent任务 / 用户与审计
 
 ---
 
