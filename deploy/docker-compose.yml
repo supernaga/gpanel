@@ -23,8 +23,6 @@ services:
       DB_DSN: postgres://gpanel:${POSTGRES_PASSWORD}@postgres:5432/gpanel?sslmode=disable
       JWT_SECRET: ${JWT_SECRET}
       AGENT_TOKEN: ${AGENT_TOKEN}
-      CORS_ALLOW_ORIGIN: ${CORS_ALLOW_ORIGIN:-*}
-      WS_ALLOW_ORIGIN: ${WS_ALLOW_ORIGIN:-*}
     depends_on:
       postgres:
         condition: service_healthy
