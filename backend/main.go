@@ -32,10 +32,12 @@ type App struct {
 	jwtSecret        []byte
 	agentToken       string
 	webhookURL       string
-	offlineMinutes   int
-	alertDedupeMins  int
-	taskTimeoutSecs  int
-	taskMaxRetries   int
+	offlineMinutes     int
+	alertDedupeMins    int
+	taskTimeoutSecs    int
+	taskMaxRetries     int
+	taskDispatchPerNode int
+	alertSilentHours   string
 }
 
 type Claims struct {
@@ -131,6 +133,7 @@ type AgentTask struct {
 	RetryCount    int        `json:"retryCount"`
 	MaxRetries    int        `json:"maxRetries"`
 	TimeoutSecs   int        `json:"timeoutSecs"`
+	Priority      int        `json:"priority"`
 	CreatedAt     time.Time  `json:"createdAt"`
 	Dispatched    *time.Time `json:"dispatchedAt,omitempty"`
 	DoneAt        *time.Time `json:"doneAt,omitempty"`
@@ -250,6 +253,7 @@ CREATE TABLE IF NOT EXISTS agent_tasks (
   retry_count INT NOT NULL DEFAULT 0,
   max_retries INT NOT NULL DEFAULT 3,
   timeout_seconds INT NOT NULL DEFAULT 300,
+  priority INT NOT NULL DEFAULT 50,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   dispatched_at TIMESTAMPTZ,
   done_at TIMESTAMPTZ
@@ -266,6 +270,7 @@ CREATE TABLE IF NOT EXISTS settings (
 	_, _ = a.db.ExecContext(ctx, `ALTER TABLE agent_tasks ADD COLUMN IF NOT EXISTS retry_count INT NOT NULL DEFAULT 0`)
 	_, _ = a.db.ExecContext(ctx, `ALTER TABLE agent_tasks ADD COLUMN IF NOT EXISTS max_retries INT NOT NULL DEFAULT 3`)
 	_, _ = a.db.ExecContext(ctx, `ALTER TABLE agent_tasks ADD COLUMN IF NOT EXISTS timeout_seconds INT NOT NULL DEFAULT 300`)
+	_, _ = a.db.ExecContext(ctx, `ALTER TABLE agent_tasks ADD COLUMN IF NOT EXISTS priority INT NOT NULL DEFAULT 50`)
 	return a.seed(ctx)
 }
 
@@ -298,8 +303,10 @@ VALUES('viewer',$1,'viewer') ON CONFLICT (username) DO NOTHING`, string(hash))
 ('alert.offline_minutes',$1),
 ('alert.dedupe_minutes',$2),
 ('task.timeout_seconds',$3),
-('task.max_retries',$4)
-ON CONFLICT (key) DO NOTHING`, strconv.Itoa(a.offlineMinutes), strconv.Itoa(a.alertDedupeMins), strconv.Itoa(a.taskTimeoutSecs), strconv.Itoa(a.taskMaxRetries))
+('task.max_retries',$4),
+('task.dispatch_per_node',$5),
+('alert.silent_hours',$6)
+ON CONFLICT (key) DO NOTHING`, strconv.Itoa(a.offlineMinutes), strconv.Itoa(a.alertDedupeMins), strconv.Itoa(a.taskTimeoutSecs), strconv.Itoa(a.taskMaxRetries), strconv.Itoa(a.taskDispatchPerNode), a.alertSilentHours)
 	return nil
 }
 
@@ -377,6 +384,17 @@ func (a *App) audit(ctx context.Context, action, target, detail string) {
 	_, _ = a.db.ExecContext(ctx, `INSERT INTO audit_logs(user_id,action,target,detail) VALUES($1,$2,$3,$4)`, uid, action, target, detail)
 }
 
+func (a *App) inSilentWindow(now time.Time) bool {
+	if strings.TrimSpace(a.alertSilentHours) == "" { return false }
+	parts := strings.Split(a.alertSilentHours, "-")
+	if len(parts) != 2 { return false }
+	start, e1 := strconv.Atoi(parts[0]); end, e2 := strconv.Atoi(parts[1])
+	if e1 != nil || e2 != nil || start < 0 || start > 23 || end < 0 || end > 23 { return false }
+	h := now.Hour()
+	if start <= end { return h >= start && h < end }
+	return h >= start || h < end
+}
+
 func (a *App) createAlert(ctx context.Context, level, source, msg string) {
 	var id int64
 	err := a.db.QueryRowContext(ctx, `SELECT id FROM alerts WHERE source=$1 AND message=$2 AND read=false AND created_at > now() - make_interval(mins => $3) ORDER BY id DESC LIMIT 1`, source, msg, a.alertDedupeMins).Scan(&id)
@@ -384,7 +402,7 @@ func (a *App) createAlert(ctx context.Context, level, source, msg string) {
 		return
 	}
 	_, _ = a.db.ExecContext(ctx, `INSERT INTO alerts(level,source,message,read) VALUES($1,$2,$3,false)`, level, source, msg)
-	if a.webhookURL == "" {
+	if a.webhookURL == "" || a.inSilentWindow(time.Now()) {
 		return
 	}
 	payload := map[string]string{"level": level, "source": source, "message": msg}
@@ -442,6 +460,8 @@ func main() {
 	alertDedupeMins, _ := strconv.Atoi(mustEnv("ALERT_DEDUPE_MINUTES", "5"))
 	taskTimeoutSecs, _ := strconv.Atoi(mustEnv("TASK_TIMEOUT_SECONDS", "300"))
 	taskMaxRetries, _ := strconv.Atoi(mustEnv("TASK_MAX_RETRIES", "3"))
+	taskDispatchPerNode, _ := strconv.Atoi(mustEnv("TASK_DISPATCH_PER_NODE", "1"))
+	alertSilentHours := mustEnv("ALERT_SILENT_HOURS", "")
 
 	db, err := sql.Open("pgx", dsn)
 	if err != nil {
@@ -452,7 +472,7 @@ func main() {
 		log.Fatal(err)
 	}
 
-	app := &App{db: db, jwtSecret: []byte(jwtSecret), agentToken: agentToken, webhookURL: webhookURL, offlineMinutes: offlineMinutes, alertDedupeMins: alertDedupeMins, taskTimeoutSecs: taskTimeoutSecs, taskMaxRetries: taskMaxRetries}
+	app := &App{db: db, jwtSecret: []byte(jwtSecret), agentToken: agentToken, webhookURL: webhookURL, offlineMinutes: offlineMinutes, alertDedupeMins: alertDedupeMins, taskTimeoutSecs: taskTimeoutSecs, taskMaxRetries: taskMaxRetries, taskDispatchPerNode: taskDispatchPerNode, alertSilentHours: alertSilentHours}
 	ctx := context.Background()
 	if err := app.initSchema(ctx); err != nil {
 		log.Fatal(err)
@@ -541,11 +561,17 @@ WHERE status='dispatched' AND dispatched_at IS NOT NULL
   AND now() - dispatched_at > make_interval(secs => timeout_seconds)
   AND retry_count >= max_retries`)
 
-		q := `SELECT id,node_uid,node_name,command,payload,status,result,retry_count,max_retries,timeout_seconds,created_at,dispatched_at,done_at FROM agent_tasks
+		var inFlight int
+		_ = tx.QueryRow(`SELECT COUNT(*) FROM agent_tasks WHERE status='dispatched' AND (node_uid=$1 OR node_name=$2)`, nodeUID, nodeName).Scan(&inFlight)
+		if inFlight >= app.taskDispatchPerNode {
+			writeJSON(w, 200, map[string]any{"task": nil, "reason": "dispatch_limit"})
+			return
+		}
+		q := `SELECT id,node_uid,node_name,command,payload,status,result,retry_count,max_retries,timeout_seconds,priority,created_at,dispatched_at,done_at FROM agent_tasks
 WHERE status='pending' AND (node_uid=$1 OR node_name=$2 OR (node_uid='' AND node_name=''))
-ORDER BY id LIMIT 1 FOR UPDATE SKIP LOCKED`
+ORDER BY priority DESC, id LIMIT 1 FOR UPDATE SKIP LOCKED`
 		var t AgentTask
-		err = tx.QueryRow(q, nodeUID, nodeName).Scan(&t.ID, &t.NodeUID, &t.NodeName, &t.Command, &t.Payload, &t.Status, &t.Result, &t.RetryCount, &t.MaxRetries, &t.TimeoutSecs, &t.CreatedAt, &t.Dispatched, &t.DoneAt)
+		err = tx.QueryRow(q, nodeUID, nodeName).Scan(&t.ID, &t.NodeUID, &t.NodeName, &t.Command, &t.Payload, &t.Status, &t.Result, &t.RetryCount, &t.MaxRetries, &t.TimeoutSecs, &t.Priority, &t.CreatedAt, &t.Dispatched, &t.DoneAt)
 		if err == sql.ErrNoRows {
 			writeJSON(w, 200, map[string]any{"task": nil})
 			return
@@ -611,13 +637,15 @@ ORDER BY id LIMIT 1 FOR UPDATE SKIP LOCKED`
 	api.HandleFunc("/api/settings/alerts", func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodGet:
-			writeJSON(w, 200, map[string]int{"offlineMinutes": app.offlineMinutes, "dedupeMinutes": app.alertDedupeMins, "taskTimeoutSeconds": app.taskTimeoutSecs, "taskMaxRetries": app.taskMaxRetries})
+			writeJSON(w, 200, map[string]any{"offlineMinutes": app.offlineMinutes, "dedupeMinutes": app.alertDedupeMins, "taskTimeoutSeconds": app.taskTimeoutSecs, "taskMaxRetries": app.taskMaxRetries, "taskDispatchPerNode": app.taskDispatchPerNode, "alertSilentHours": app.alertSilentHours})
 		case http.MethodPatch:
 			var req struct {
-				OfflineMinutes    int `json:"offlineMinutes"`
-				DedupeMinutes     int `json:"dedupeMinutes"`
-				TaskTimeoutSecs   int `json:"taskTimeoutSeconds"`
-				TaskMaxRetries    int `json:"taskMaxRetries"`
+				OfflineMinutes      int    `json:"offlineMinutes"`
+				DedupeMinutes       int    `json:"dedupeMinutes"`
+				TaskTimeoutSecs     int    `json:"taskTimeoutSeconds"`
+				TaskMaxRetries      int    `json:"taskMaxRetries"`
+				TaskDispatchPerNode int    `json:"taskDispatchPerNode"`
+				AlertSilentHours    string `json:"alertSilentHours"`
 			}
 			if json.NewDecoder(r.Body).Decode(&req) != nil {
 				writeJSON(w, 400, map[string]string{"error": "invalid payload"})
@@ -627,8 +655,10 @@ ORDER BY id LIMIT 1 FOR UPDATE SKIP LOCKED`
 			if req.DedupeMinutes > 0 { app.alertDedupeMins = req.DedupeMinutes; _, _ = app.db.Exec(`UPDATE settings SET value=$2,updated_at=now() WHERE key=$1`, "alert.dedupe_minutes", strconv.Itoa(req.DedupeMinutes)) }
 			if req.TaskTimeoutSecs > 0 { app.taskTimeoutSecs = req.TaskTimeoutSecs; _, _ = app.db.Exec(`UPDATE settings SET value=$2,updated_at=now() WHERE key=$1`, "task.timeout_seconds", strconv.Itoa(req.TaskTimeoutSecs)) }
 			if req.TaskMaxRetries >= 0 { app.taskMaxRetries = req.TaskMaxRetries; _, _ = app.db.Exec(`UPDATE settings SET value=$2,updated_at=now() WHERE key=$1`, "task.max_retries", strconv.Itoa(req.TaskMaxRetries)) }
+			if req.TaskDispatchPerNode > 0 { app.taskDispatchPerNode = req.TaskDispatchPerNode; _, _ = app.db.Exec(`UPDATE settings SET value=$2,updated_at=now() WHERE key=$1`, "task.dispatch_per_node", strconv.Itoa(req.TaskDispatchPerNode)) }
+			if strings.TrimSpace(req.AlertSilentHours) != "" { app.alertSilentHours = req.AlertSilentHours; _, _ = app.db.Exec(`UPDATE settings SET value=$2,updated_at=now() WHERE key=$1`, "alert.silent_hours", req.AlertSilentHours) }
 			app.audit(r.Context(), "settings.alerts.update", "settings/alerts", "updated")
-			writeJSON(w, 200, map[string]int{"offlineMinutes": app.offlineMinutes, "dedupeMinutes": app.alertDedupeMins, "taskTimeoutSeconds": app.taskTimeoutSecs, "taskMaxRetries": app.taskMaxRetries})
+			writeJSON(w, 200, map[string]any{"offlineMinutes": app.offlineMinutes, "dedupeMinutes": app.alertDedupeMins, "taskTimeoutSeconds": app.taskTimeoutSecs, "taskMaxRetries": app.taskMaxRetries, "taskDispatchPerNode": app.taskDispatchPerNode, "alertSilentHours": app.alertSilentHours})
 		default:
 			w.WriteHeader(http.StatusMethodNotAllowed)
 		}
@@ -734,12 +764,12 @@ ORDER BY id LIMIT 1 FOR UPDATE SKIP LOCKED`
 	api.HandleFunc("/api/agent/tasks", func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodGet:
-			rows, _ := app.db.Query(`SELECT id,node_uid,node_name,command,payload,status,result,retry_count,max_retries,timeout_seconds,created_at,dispatched_at,done_at FROM agent_tasks ORDER BY id DESC LIMIT 200`)
+			rows, _ := app.db.Query(`SELECT id,node_uid,node_name,command,payload,status,result,retry_count,max_retries,timeout_seconds,priority,created_at,dispatched_at,done_at FROM agent_tasks ORDER BY id DESC LIMIT 200`)
 			defer rows.Close()
 			out := []AgentTask{}
 			for rows.Next() {
 				var t AgentTask
-				_ = rows.Scan(&t.ID, &t.NodeUID, &t.NodeName, &t.Command, &t.Payload, &t.Status, &t.Result, &t.RetryCount, &t.MaxRetries, &t.TimeoutSecs, &t.CreatedAt, &t.Dispatched, &t.DoneAt)
+				_ = rows.Scan(&t.ID, &t.NodeUID, &t.NodeName, &t.Command, &t.Payload, &t.Status, &t.Result, &t.RetryCount, &t.MaxRetries, &t.TimeoutSecs, &t.Priority, &t.CreatedAt, &t.Dispatched, &t.DoneAt)
 				out = append(out, t)
 			}
 			writeJSON(w, 200, out)
@@ -751,6 +781,7 @@ ORDER BY id LIMIT 1 FOR UPDATE SKIP LOCKED`
 				Payload      string `json:"payload"`
 				MaxRetries   int    `json:"maxRetries"`
 				TimeoutSecs  int    `json:"timeoutSecs"`
+				Priority     int    `json:"priority"`
 			}
 			if json.NewDecoder(r.Body).Decode(&req) != nil || req.Command == "" {
 				writeJSON(w, 400, map[string]string{"error": "invalid payload"})
@@ -762,9 +793,10 @@ ORDER BY id LIMIT 1 FOR UPDATE SKIP LOCKED`
 			}
 			if req.MaxRetries <= 0 { req.MaxRetries = app.taskMaxRetries }
 			if req.TimeoutSecs <= 0 { req.TimeoutSecs = app.taskTimeoutSecs }
+			if req.Priority == 0 { req.Priority = 50 }
 			var t AgentTask
-			err := app.db.QueryRow(`INSERT INTO agent_tasks(node_uid,node_name,command,payload,status,retry_count,max_retries,timeout_seconds) VALUES($1,$2,$3,$4,'pending',0,$5,$6) RETURNING id,node_uid,node_name,command,payload,status,result,retry_count,max_retries,timeout_seconds,created_at,dispatched_at,done_at`, req.NodeUID, req.NodeName, req.Command, req.Payload, req.MaxRetries, req.TimeoutSecs).
-				Scan(&t.ID, &t.NodeUID, &t.NodeName, &t.Command, &t.Payload, &t.Status, &t.Result, &t.RetryCount, &t.MaxRetries, &t.TimeoutSecs, &t.CreatedAt, &t.Dispatched, &t.DoneAt)
+			err := app.db.QueryRow(`INSERT INTO agent_tasks(node_uid,node_name,command,payload,status,retry_count,max_retries,timeout_seconds,priority) VALUES($1,$2,$3,$4,'pending',0,$5,$6,$7) RETURNING id,node_uid,node_name,command,payload,status,result,retry_count,max_retries,timeout_seconds,priority,created_at,dispatched_at,done_at`, req.NodeUID, req.NodeName, req.Command, req.Payload, req.MaxRetries, req.TimeoutSecs, req.Priority).
+				Scan(&t.ID, &t.NodeUID, &t.NodeName, &t.Command, &t.Payload, &t.Status, &t.Result, &t.RetryCount, &t.MaxRetries, &t.TimeoutSecs, &t.Priority, &t.CreatedAt, &t.Dispatched, &t.DoneAt)
 			if err != nil {
 				writeJSON(w, 500, map[string]string{"error": err.Error()})
 				return

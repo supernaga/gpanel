@@ -25,6 +25,8 @@
       <input v-model.number="settings.dedupeMinutes" type="number" min="1" placeholder="去重窗口(分)" />
       <input v-model.number="settings.taskTimeoutSeconds" type="number" min="10" placeholder="任务超时(秒)" />
       <input v-model.number="settings.taskMaxRetries" type="number" min="0" placeholder="任务重试次数" />
+      <input v-model.number="settings.taskDispatchPerNode" type="number" min="1" placeholder="单节点并发派发" />
+      <input v-model="settings.alertSilentHours" placeholder="静默时段，如 23-8" />
       <button type="submit">保存策略</button>
     </form>
 
@@ -52,7 +54,7 @@ import { onMounted, ref } from 'vue'
 import { api } from '../api/client'
 const users = ref([])
 const logs = ref([])
-const settings = ref({ offlineMinutes: 2, dedupeMinutes: 5, taskTimeoutSeconds: 300, taskMaxRetries: 3 })
+const settings = ref({ offlineMinutes: 2, dedupeMinutes: 5, taskTimeoutSeconds: 300, taskMaxRetries: 3, taskDispatchPerNode: 1, alertSilentHours: '' })
 const filters = ref({ userId: '', action: '', from: '', to: '' })
 const userForm = ref({ username: '', password: '', role: 'viewer' })
 const load = async () => {

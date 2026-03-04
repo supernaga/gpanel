@@ -30,6 +30,8 @@ services:
       ALERT_DEDUPE_MINUTES: ${ALERT_DEDUPE_MINUTES:-5}
       TASK_TIMEOUT_SECONDS: ${TASK_TIMEOUT_SECONDS:-300}
       TASK_MAX_RETRIES: ${TASK_MAX_RETRIES:-3}
+      TASK_DISPATCH_PER_NODE: ${TASK_DISPATCH_PER_NODE:-1}
+      ALERT_SILENT_HOURS: ${ALERT_SILENT_HOURS:-}
     depends_on:
       postgres:
         condition: service_healthy
