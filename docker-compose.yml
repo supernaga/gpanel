@@ -1,23 +1,42 @@
-version: '3.9'
 services:
-  backend:
-    image: golang:1.22
-    working_dir: /app
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: gpanel
+      POSTGRES_USER: gpanel
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-gpanel}
     volumes:
-      - ./backend:/app
-    command: sh -c "go mod tidy && go run main.go"
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U gpanel -d gpanel"]
+      interval: 10s
+      timeout: 5s
+      retries: 8
+
+  backend:
+    build: ./backend
+    environment:
+      PORT: 8080
+      DB_DSN: postgres://gpanel:${POSTGRES_PASSWORD:-gpanel}@postgres:5432/gpanel?sslmode=disable
+      JWT_SECRET: ${JWT_SECRET:-dev-secret}
+      AGENT_TOKEN: ${AGENT_TOKEN:-dev-agent-token}
+      ADMIN_USER: ${ADMIN_USER:-admin}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-admin123}
     ports:
       - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
 
   frontend:
-    image: node:22
-    working_dir: /app
-    volumes:
-      - ./frontend:/app
-    environment:
-      - VITE_API_BASE=http://localhost:8080
-    command: sh -c "npm install && npm run dev -- --host 0.0.0.0 --port 5173"
+    build:
+      context: ./frontend
+      args:
+        VITE_API_BASE: ${VITE_API_BASE:-}
     ports:
-      - "5173:5173"
+      - "5173:80"
     depends_on:
       - backend
+
+volumes:
+  pgdata:

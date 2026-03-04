@@ -34,6 +34,7 @@ TASK_DISPATCH_PER_NODE="${TASK_DISPATCH_PER_NODE:-1}"
 ALERT_SILENT_HOURS="${ALERT_SILENT_HOURS:-}"
 IMAGE_PREFIX="${IMAGE_PREFIX:-ghcr.io/supernaga/gpanel}"
 
+write_env() {
 cat > deploy/.env <<EOT
 POSTGRES_PASSWORD=$POSTGRES_PASSWORD
 JWT_SECRET=$JWT_SECRET
@@ -49,9 +50,27 @@ TASK_DISPATCH_PER_NODE=$TASK_DISPATCH_PER_NODE
 ALERT_SILENT_HOURS=$ALERT_SILENT_HOURS
 IMAGE_PREFIX=$IMAGE_PREFIX
 EOT
+}
 
+write_env
 cd deploy
-docker compose up -d --build
+
+set +e
+docker compose up -d --pull always
+rc=$?
+set -e
+
+if [ $rc -ne 0 ]; then
+  echo "[WARN] Pull-based deploy failed, fallback to local image build..."
+  cd "$APP_DIR"
+  IMAGE_PREFIX="local/gpanel"
+  docker build -t ${IMAGE_PREFIX}-server:latest ./backend
+  docker build -t ${IMAGE_PREFIX}-web:latest ./frontend
+  docker build -t ${IMAGE_PREFIX}-agent:latest ./agent || true
+  write_env
+  cd deploy
+  docker compose up -d --pull never
+fi
 
 IP="$(hostname -I | awk '{print $1}')"
 echo ""

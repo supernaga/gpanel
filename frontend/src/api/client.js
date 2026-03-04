@@ -1,4 +1,4 @@
-const API_BASE = import.meta.env.VITE_API_BASE || 'http://localhost:8080'
+const API_BASE = import.meta.env.VITE_API_BASE || ''
 
 const getToken = () => localStorage.getItem('gpanel_token') || ''
 
@@ -50,5 +50,10 @@ export const api = {
   alerts: () => req('/api/alerts'),
   readAlert: (id) => req(`/api/alerts/${id}/read`, { method: 'PATCH' }),
 
-  wsUrl: () => `${API_BASE.replace('http', 'ws')}/ws/metrics?token=${encodeURIComponent(getToken())}`
+  wsUrl: () => {
+    const token = encodeURIComponent(getToken())
+    if (API_BASE.startsWith('http')) return `${API_BASE.replace(/^http/, 'ws')}/ws/metrics?token=${token}`
+    const proto = location.protocol === 'https:' ? 'wss' : 'ws'
+    return `${proto}://${location.host}/ws/metrics?token=${token}`
+  }
 }

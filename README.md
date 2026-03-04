@@ -29,7 +29,7 @@ curl -fsSL https://raw.githubusercontent.com/supernaga/gpanel/main/deploy/instal
 
 安装完成后访问：
 
-- `http://服务器IP`
+- `http://服务器IP`（默认 80 端口）
 
 安装脚本会输出：
 
