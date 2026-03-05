@@ -20,6 +20,12 @@ fi
 
 cd "$APP_DIR"
 
+if [ -f deploy/.env ]; then
+  set -a
+  . deploy/.env
+  set +a
+fi
+
 POSTGRES_PASSWORD="${POSTGRES_PASSWORD:-$(rand)}"
 JWT_SECRET="${JWT_SECRET:-$(rand)}"
 AGENT_TOKEN="${AGENT_TOKEN:-$(rand)}"
