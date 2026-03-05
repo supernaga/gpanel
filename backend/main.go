@@ -844,24 +844,84 @@ ORDER BY priority DESC, id LIMIT 1 FOR UPDATE SKIP LOCKED`
 		}
 	})
 	api.HandleFunc("/api/nodes/", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPatch {
-			w.WriteHeader(http.StatusMethodNotAllowed)
-			return
-		}
-		id, err := parseID(r.URL.Path, "nodes", "toggle")
-		if err != nil {
+		parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+		if len(parts) < 3 || parts[0] != "api" || parts[1] != "nodes" {
 			writeJSON(w, 400, map[string]string{"error": "bad path"})
 			return
 		}
-		_, _ = app.db.Exec(`UPDATE nodes SET status=CASE WHEN status='online' THEN 'offline' ELSE 'online' END, latency_ms=CASE WHEN status='online' THEN 0 ELSE $2 END, updated_at=now() WHERE id=$1`, id, rand.Intn(70)+20)
-		var n Node
-		err = app.db.QueryRow(`SELECT id,name,region,status,latency_ms,version,updated_at FROM nodes WHERE id=$1`, id).Scan(&n.ID, &n.Name, &n.Region, &n.Status, &n.LatencyMs, &n.Version, &n.UpdatedAt)
+		id, err := strconv.ParseInt(parts[2], 10, 64)
 		if err != nil {
-			writeJSON(w, 404, map[string]string{"error": "node not found"})
+			writeJSON(w, 400, map[string]string{"error": "invalid id"})
 			return
 		}
-		app.audit(r.Context(), "node.toggle", fmt.Sprintf("node/%d", n.ID), n.Status)
-		writeJSON(w, 200, n)
+
+		if len(parts) == 4 && parts[3] == "toggle" && r.Method == http.MethodPatch {
+			_, _ = app.db.Exec(`UPDATE nodes SET status=CASE WHEN status='online' THEN 'offline' ELSE 'online' END, latency_ms=CASE WHEN status='online' THEN 0 ELSE $2 END, updated_at=now() WHERE id=$1`, id, rand.Intn(70)+20)
+			var n Node
+			err = app.db.QueryRow(`SELECT id,name,region,status,latency_ms,version,updated_at FROM nodes WHERE id=$1`, id).Scan(&n.ID, &n.Name, &n.Region, &n.Status, &n.LatencyMs, &n.Version, &n.UpdatedAt)
+			if err != nil {
+				writeJSON(w, 404, map[string]string{"error": "node not found"})
+				return
+			}
+			app.audit(r.Context(), "node.toggle", fmt.Sprintf("node/%d", n.ID), n.Status)
+			writeJSON(w, 200, n)
+			return
+		}
+
+		if len(parts) == 4 && parts[3] == "update" && r.Method == http.MethodPatch {
+			var req struct {
+				Name    string `json:"name"`
+				Region  string `json:"region"`
+				Version string `json:"version"`
+			}
+			if json.NewDecoder(r.Body).Decode(&req) != nil {
+				writeJSON(w, 400, map[string]string{"error": "invalid payload"})
+				return
+			}
+			_, _ = app.db.Exec(`UPDATE nodes SET name=COALESCE(NULLIF($2,''),name), region=COALESCE(NULLIF($3,''),region), version=COALESCE(NULLIF($4,''),version), updated_at=now() WHERE id=$1`, id, req.Name, req.Region, req.Version)
+			var n Node
+			err = app.db.QueryRow(`SELECT id,name,region,status,latency_ms,version,updated_at FROM nodes WHERE id=$1`, id).Scan(&n.ID, &n.Name, &n.Region, &n.Status, &n.LatencyMs, &n.Version, &n.UpdatedAt)
+			if err != nil {
+				writeJSON(w, 404, map[string]string{"error": "node not found"})
+				return
+			}
+			app.audit(r.Context(), "node.update", fmt.Sprintf("node/%d", n.ID), n.Name)
+			writeJSON(w, 200, n)
+			return
+		}
+
+		if len(parts) == 4 && parts[3] == "heartbeats" && r.Method == http.MethodGet {
+			rows, err := app.db.Query(`SELECT node_uid,node_name,node_ip,version,latency_ms,created_at FROM agent_heartbeats WHERE node_name=(SELECT name FROM nodes WHERE id=$1) ORDER BY created_at DESC LIMIT 50`, id)
+			if err != nil {
+				writeJSON(w, 500, map[string]string{"error": err.Error()})
+				return
+			}
+			defer rows.Close()
+			out := []map[string]any{}
+			for rows.Next() {
+				var uid, name, ip, version string
+				var latency int
+				var created time.Time
+				_ = rows.Scan(&uid, &name, &ip, &version, &latency, &created)
+				out = append(out, map[string]any{"nodeUid": uid, "nodeName": name, "nodeIp": ip, "version": version, "latencyMs": latency, "createdAt": created})
+			}
+			writeJSON(w, 200, out)
+			return
+		}
+
+		if len(parts) == 4 && parts[3] == "delete" && r.Method == http.MethodDelete {
+			res, _ := app.db.Exec(`DELETE FROM nodes WHERE id=$1`, id)
+			aff, _ := res.RowsAffected()
+			if aff == 0 {
+				writeJSON(w, 404, map[string]string{"error": "node not found"})
+				return
+			}
+			app.audit(r.Context(), "node.delete", fmt.Sprintf("node/%d", id), "deleted")
+			writeJSON(w, 200, map[string]any{"ok": true})
+			return
+		}
+
+		w.WriteHeader(http.StatusMethodNotAllowed)
 	})
 
 	api.HandleFunc("/api/clients", func(w http.ResponseWriter, r *http.Request) {

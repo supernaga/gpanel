@@ -34,6 +34,9 @@ export const api = {
   nodes: () => req('/api/nodes'),
   addNode: (payload) => req('/api/nodes', { method: 'POST', body: JSON.stringify(payload) }),
   toggleNode: (id) => req(`/api/nodes/${id}/toggle`, { method: 'PATCH' }),
+  updateNode: (id, payload) => req(`/api/nodes/${id}/update`, { method: 'PATCH', body: JSON.stringify(payload) }),
+  deleteNode: (id) => req(`/api/nodes/${id}/delete`, { method: 'DELETE' }),
+  nodeHeartbeats: (id) => req(`/api/nodes/${id}/heartbeats`),
 
   clients: () => req('/api/clients'),
   addClient: (payload) => req('/api/clients', { method: 'POST', body: JSON.stringify(payload) }),
