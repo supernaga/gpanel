@@ -49,6 +49,7 @@ jobs:
           [ $n -lt 3 ]
 
   deploy:
+    if: ${{ secrets.DEPLOY_HOST != '' && secrets.DEPLOY_USER != '' && secrets.DEPLOY_SSH_KEY != '' }}
     runs-on: ubuntu-latest
     needs: build-and-push
 
