@@ -39,7 +39,14 @@ jobs:
       - name: Build & Push agent
         run: |
           docker build -t $IMAGE_PREFIX-agent:latest ./agent
-          docker push $IMAGE_PREFIX-agent:latest
+          n=0
+          until [ $n -ge 3 ]; do
+            docker push $IMAGE_PREFIX-agent:latest && break
+            n=$((n+1))
+            echo "agent push failed, retry $n/3..."
+            sleep 5
+          done
+          [ $n -lt 3 ]
 
   deploy:
     runs-on: ubuntu-latest
