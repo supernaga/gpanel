@@ -624,6 +624,11 @@ ORDER BY priority DESC, id LIMIT 1 FOR UPDATE SKIP LOCKED`
 	})))
 
 	api := http.NewServeMux()
+	createNodeTask := func(nodeName, command string, payload map[string]any) error {
+		p, _ := json.Marshal(payload)
+		_, err := app.db.Exec(`INSERT INTO agent_tasks(node_uid,node_name,command,payload,status,retry_count,max_retries,timeout_seconds,priority) VALUES('',$1,$2,$3,'pending',0,$4,$5,$6)`, nodeName, command, string(p), app.taskMaxRetries, app.taskTimeoutSecs, 60)
+		return err
+	}
 
 	api.HandleFunc("/api/dashboard/summary", func(w http.ResponseWriter, r *http.Request) {
 		var s DashboardSummary
@@ -921,6 +926,46 @@ ORDER BY priority DESC, id LIMIT 1 FOR UPDATE SKIP LOCKED`
 			return
 		}
 
+		if len(parts) == 5 && parts[3] == "gost" && r.Method == http.MethodPost {
+			action := parts[4]
+			var req struct {
+				Name   string `json:"name"`
+				Mode   string `json:"mode"`
+				Listen string `json:"listen"`
+				Target string `json:"target"`
+				Protocol string `json:"protocol"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&req)
+			var nodeName string
+			err = app.db.QueryRow(`SELECT name FROM nodes WHERE id=$1`, id).Scan(&nodeName)
+			if err != nil {
+				writeJSON(w, 404, map[string]string{"error": "node not found"})
+				return
+			}
+			var cmd string
+			payload := map[string]any{"name": req.Name, "mode": req.Mode, "listen": req.Listen, "target": req.Target, "protocol": req.Protocol}
+			switch action {
+			case "install": cmd = "gost.install"
+			case "start": cmd = "gost.start"
+			case "stop": cmd = "gost.stop"
+			case "restart": cmd = "gost.restart"
+			case "status": cmd = "gost.status"
+			case "apply-forward": cmd = "gost.apply_forward"
+			case "apply-tunnel": cmd = "gost.apply_tunnel"
+			default:
+				writeJSON(w, 400, map[string]string{"error": "unsupported gost action"})
+				return
+			}
+			if req.Name == "" { payload["name"] = fmt.Sprintf("node-%d", id) }
+			if err := createNodeTask(nodeName, cmd, payload); err != nil {
+				writeJSON(w, 500, map[string]string{"error": err.Error()})
+				return
+			}
+			app.audit(r.Context(), "node.gost", fmt.Sprintf("node/%d", id), cmd)
+			writeJSON(w, 200, map[string]any{"ok": true, "command": cmd, "node": nodeName})
+			return
+		}
+
 		w.WriteHeader(http.StatusMethodNotAllowed)
 	})
 
@@ -999,6 +1044,9 @@ ORDER BY priority DESC, id LIMIT 1 FOR UPDATE SKIP LOCKED`
 				writeJSON(w, 500, map[string]string{"error": err.Error()})
 				return
 			}
+			var nodeName string
+			_ = app.db.QueryRow(`SELECT name FROM nodes WHERE id=$1`, req.NodeID).Scan(&nodeName)
+			_ = createNodeTask(nodeName, "gost.apply_forward", map[string]any{"name": req.Name, "protocol": req.Protocol, "listen": req.ListenAddr, "target": req.TargetAddr})
 			app.audit(r.Context(), "forward.create", fmt.Sprintf("forward/%d", f.ID), f.Name)
 			writeJSON(w, 201, f)
 		default:
@@ -1021,6 +1069,13 @@ ORDER BY priority DESC, id LIMIT 1 FOR UPDATE SKIP LOCKED`
 		if err != nil {
 			writeJSON(w, 404, map[string]string{"error": "forward not found"})
 			return
+		}
+		var nodeName string
+		_ = app.db.QueryRow(`SELECT name FROM nodes WHERE id=$1`, f.NodeID).Scan(&nodeName)
+		if f.Status == "enabled" {
+			_ = createNodeTask(nodeName, "gost.start", map[string]any{"name": f.Name})
+		} else {
+			_ = createNodeTask(nodeName, "gost.stop", map[string]any{"name": f.Name})
 		}
 		app.audit(r.Context(), "forward.toggle", fmt.Sprintf("forward/%d", f.ID), f.Status)
 		writeJSON(w, 200, f)

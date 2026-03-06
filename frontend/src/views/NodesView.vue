@@ -36,6 +36,8 @@
             <button v-else @click="saveEdit(n.id)">保存</button>
             <button v-if="editingId === n.id" @click="cancelEdit">取消</button>
             <button @click="showHeartbeats(n.id)">详情</button>
+            <button @click="installGost(n.id)">安装GOST</button>
+            <button @click="startTunnel(n.id)">启隧道</button>
             <button @click="removeNode(n.id)">删除</button>
           </td>
         </tr>
@@ -102,6 +104,19 @@ const removeNode = async (id) => {
 const showHeartbeats = async (id) => {
   heartbeatNodeId.value = id
   heartbeats.value = await api.nodeHeartbeats(id)
+}
+
+const installGost = async (id) => {
+  await api.nodeGostAction(id, 'install', {})
+  alert('已下发安装任务，请到 Agent任务 查看执行结果')
+}
+
+const startTunnel = async (id) => {
+  const name = prompt('隧道名称', 'default-tunnel') || 'default-tunnel'
+  const mode = prompt('模式 (socks5/http)', 'socks5') || 'socks5'
+  const listen = prompt('监听地址', ':1080') || ':1080'
+  await api.nodeGostAction(id, 'apply-tunnel', { name, mode, listen })
+  alert('已下发隧道任务，请到 Agent任务 查看执行结果')
 }
 
 onMounted(load)
