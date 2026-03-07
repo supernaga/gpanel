@@ -139,6 +139,27 @@ type AgentTask struct {
 	DoneAt        *time.Time `json:"doneAt,omitempty"`
 }
 
+type Tunnel struct {
+	ID          int64     `json:"id"`
+	Name        string    `json:"name"`
+	Mode        string    `json:"mode"`
+	Listen      string    `json:"listen"`
+	NodeID      int64     `json:"nodeId"`
+	Enabled     bool      `json:"enabled"`
+	Description string    `json:"description"`
+	CreatedAt   time.Time `json:"createdAt"`
+}
+
+type Chain struct {
+	ID          int64     `json:"id"`
+	Name        string    `json:"name"`
+	Path        string    `json:"path"`
+	Protocol    string    `json:"protocol"`
+	Enabled     bool      `json:"enabled"`
+	Description string    `json:"description"`
+	CreatedAt   time.Time `json:"createdAt"`
+}
+
 var upgrader = websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
 
 func writeJSON(w http.ResponseWriter, code int, v any) {
@@ -648,6 +669,28 @@ ORDER BY priority DESC, id LIMIT 1 FOR UPDATE SKIP LOCKED`
 		_, err := app.db.Exec(`INSERT INTO agent_tasks(node_uid,node_name,command,payload,status,retry_count,max_retries,timeout_seconds,priority) VALUES('',$1,$2,$3,'pending',0,$4,$5,$6)`, nodeName, command, string(p), app.taskMaxRetries, app.taskTimeoutSecs, 60)
 		return err
 	}
+	mustNodeName := func(nodeID int64) (string, error) {
+		var nodeName string
+		err := app.db.QueryRow(`SELECT name FROM nodes WHERE id=$1`, nodeID).Scan(&nodeName)
+		return nodeName, err
+	}
+	orchestrateChain := func(chainName, path, protocol string) error {
+		hops := []string{}
+		for _, part := range strings.Split(path, "->") {
+			p := strings.TrimSpace(part)
+			if p != "" { hops = append(hops, p) }
+		}
+		if len(hops) < 2 { return fmt.Errorf("chain path must contain at least 2 nodes") }
+		for i := 0; i < len(hops)-1; i++ {
+			stepName := fmt.Sprintf("%s-hop-%d", chainName, i+1)
+			listen := fmt.Sprintf(":%d", 13000+i)
+			target := fmt.Sprintf("%s:%d", hops[i+1], 13000+i)
+			if err := createNodeTask(hops[i], "gost.apply_forward", map[string]any{"name": stepName, "protocol": protocol, "listen": listen, "target": target}); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
 
 	api.HandleFunc("/api/dashboard/summary", func(w http.ResponseWriter, r *http.Request) {
 		var s DashboardSummary
@@ -672,14 +715,11 @@ ORDER BY priority DESC, id LIMIT 1 FOR UPDATE SKIP LOCKED`
 		case http.MethodGet:
 			rows, _ := app.db.Query(`SELECT id,name,mode,listen,node_id,enabled,description,created_at FROM tunnels ORDER BY id DESC`)
 			defer rows.Close()
-			out := []map[string]any{}
+			out := []Tunnel{}
 			for rows.Next() {
-				var id, nodeID int64
-				var name, mode, listen, desc string
-				var enabled bool
-				var created time.Time
-				_ = rows.Scan(&id, &name, &mode, &listen, &nodeID, &enabled, &desc, &created)
-				out = append(out, map[string]any{"id": id, "name": name, "mode": mode, "listen": listen, "nodeId": nodeID, "enabled": enabled, "description": desc, "createdAt": created})
+				var t Tunnel
+				_ = rows.Scan(&t.ID, &t.Name, &t.Mode, &t.Listen, &t.NodeID, &t.Enabled, &t.Description, &t.CreatedAt)
+				out = append(out, t)
 			}
 			writeJSON(w, 200, out)
 		case http.MethodPost:
@@ -687,9 +727,10 @@ ORDER BY priority DESC, id LIMIT 1 FOR UPDATE SKIP LOCKED`
 			if json.NewDecoder(r.Body).Decode(&req) != nil || req.Name == "" || req.Mode == "" || req.Listen == "" || req.NodeID <= 0 { writeJSON(w, 400, map[string]string{"error": "invalid payload"}); return }
 			_, err := app.db.Exec(`INSERT INTO tunnels(name,mode,listen,node_id,enabled,description) VALUES($1,$2,$3,$4,true,'')`, req.Name, req.Mode, req.Listen, req.NodeID)
 			if err != nil { writeJSON(w, 500, map[string]string{"error": err.Error()}); return }
-			var nodeName string
-			_ = app.db.QueryRow(`SELECT name FROM nodes WHERE id=$1`, req.NodeID).Scan(&nodeName)
-			_ = createNodeTask(nodeName, "gost.apply_tunnel", map[string]any{"name": req.Name, "mode": req.Mode, "listen": req.Listen})
+			nodeName, err := mustNodeName(req.NodeID)
+			if err == nil {
+				_ = createNodeTask(nodeName, "gost.apply_tunnel", map[string]any{"name": req.Name, "mode": req.Mode, "listen": req.Listen})
+			}
 			writeJSON(w, 201, map[string]any{"ok": true})
 		default:
 			w.WriteHeader(http.StatusMethodNotAllowed)
@@ -701,22 +742,25 @@ ORDER BY priority DESC, id LIMIT 1 FOR UPDATE SKIP LOCKED`
 		case http.MethodGet:
 			rows, _ := app.db.Query(`SELECT id,name,path,protocol,enabled,description,created_at FROM chains ORDER BY id DESC`)
 			defer rows.Close()
-			out := []map[string]any{}
+			out := []Chain{}
 			for rows.Next() {
-				var id int64
-				var name, path, protocol, desc string
-				var enabled bool
-				var created time.Time
-				_ = rows.Scan(&id, &name, &path, &protocol, &enabled, &desc, &created)
-				out = append(out, map[string]any{"id": id, "name": name, "path": path, "protocol": protocol, "enabled": enabled, "description": desc, "createdAt": created})
+				var c Chain
+				_ = rows.Scan(&c.ID, &c.Name, &c.Path, &c.Protocol, &c.Enabled, &c.Description, &c.CreatedAt)
+				out = append(out, c)
 			}
 			writeJSON(w, 200, out)
 		case http.MethodPost:
 			var req struct { Name, Path, Protocol string }
 			if json.NewDecoder(r.Body).Decode(&req) != nil || req.Name == "" || req.Path == "" || req.Protocol == "" { writeJSON(w, 400, map[string]string{"error": "invalid payload"}); return }
-			_, err := app.db.Exec(`INSERT INTO chains(name,path,protocol,enabled,description) VALUES($1,$2,$3,false,'pending orchestration')`, req.Name, req.Path, req.Protocol)
+			description := "pending orchestration"
+			enabled := false
+			if err := orchestrateChain(req.Name, req.Path, req.Protocol); err == nil {
+				description = "tasks scheduled"
+				enabled = true
+			}
+			_, err := app.db.Exec(`INSERT INTO chains(name,path,protocol,enabled,description) VALUES($1,$2,$3,$4,$5)`, req.Name, req.Path, req.Protocol, enabled, description)
 			if err != nil { writeJSON(w, 500, map[string]string{"error": err.Error()}); return }
-			writeJSON(w, 201, map[string]any{"ok": true})
+			writeJSON(w, 201, map[string]any{"ok": true, "enabled": enabled, "description": description})
 		default:
 			w.WriteHeader(http.StatusMethodNotAllowed)
 		}
