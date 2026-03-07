@@ -258,6 +258,25 @@ CREATE TABLE IF NOT EXISTS agent_tasks (
   dispatched_at TIMESTAMPTZ,
   done_at TIMESTAMPTZ
 );
+CREATE TABLE IF NOT EXISTS tunnels (
+  id BIGSERIAL PRIMARY KEY,
+  name TEXT NOT NULL,
+  mode TEXT NOT NULL,
+  listen TEXT NOT NULL,
+  node_id BIGINT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
+  enabled BOOLEAN NOT NULL DEFAULT true,
+  description TEXT NOT NULL DEFAULT '',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS chains (
+  id BIGSERIAL PRIMARY KEY,
+  name TEXT NOT NULL,
+  path TEXT NOT NULL,
+  protocol TEXT NOT NULL,
+  enabled BOOLEAN NOT NULL DEFAULT false,
+  description TEXT NOT NULL DEFAULT '',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
 CREATE TABLE IF NOT EXISTS settings (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL,
@@ -637,6 +656,70 @@ ORDER BY priority DESC, id LIMIT 1 FOR UPDATE SKIP LOCKED`
 		_ = app.db.QueryRow(`SELECT COUNT(*) FILTER (WHERE read=false) FROM alerts`).Scan(&s.Alerts)
 		s.CurrentTraffic = float64(rand.Intn(700)+150) / 10
 		writeJSON(w, 200, s)
+	})
+
+	api.HandleFunc("/api/runtime/summary", func(w http.ResponseWriter, r *http.Request) {
+		var nodes, forwards, tunnels, chains int
+		_ = app.db.QueryRow(`SELECT COUNT(*) FROM nodes`).Scan(&nodes)
+		_ = app.db.QueryRow(`SELECT COUNT(*) FROM forwards`).Scan(&forwards)
+		_ = app.db.QueryRow(`SELECT COUNT(*) FROM tunnels`).Scan(&tunnels)
+		_ = app.db.QueryRow(`SELECT COUNT(*) FROM chains`).Scan(&chains)
+		writeJSON(w, 200, map[string]int{"nodes": nodes, "forwards": forwards, "tunnels": tunnels, "chains": chains})
+	})
+
+	api.HandleFunc("/api/tunnels", func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			rows, _ := app.db.Query(`SELECT id,name,mode,listen,node_id,enabled,description,created_at FROM tunnels ORDER BY id DESC`)
+			defer rows.Close()
+			out := []map[string]any{}
+			for rows.Next() {
+				var id, nodeID int64
+				var name, mode, listen, desc string
+				var enabled bool
+				var created time.Time
+				_ = rows.Scan(&id, &name, &mode, &listen, &nodeID, &enabled, &desc, &created)
+				out = append(out, map[string]any{"id": id, "name": name, "mode": mode, "listen": listen, "nodeId": nodeID, "enabled": enabled, "description": desc, "createdAt": created})
+			}
+			writeJSON(w, 200, out)
+		case http.MethodPost:
+			var req struct { Name, Mode, Listen string; NodeID int64 }
+			if json.NewDecoder(r.Body).Decode(&req) != nil || req.Name == "" || req.Mode == "" || req.Listen == "" || req.NodeID <= 0 { writeJSON(w, 400, map[string]string{"error": "invalid payload"}); return }
+			_, err := app.db.Exec(`INSERT INTO tunnels(name,mode,listen,node_id,enabled,description) VALUES($1,$2,$3,$4,true,'')`, req.Name, req.Mode, req.Listen, req.NodeID)
+			if err != nil { writeJSON(w, 500, map[string]string{"error": err.Error()}); return }
+			var nodeName string
+			_ = app.db.QueryRow(`SELECT name FROM nodes WHERE id=$1`, req.NodeID).Scan(&nodeName)
+			_ = createNodeTask(nodeName, "gost.apply_tunnel", map[string]any{"name": req.Name, "mode": req.Mode, "listen": req.Listen})
+			writeJSON(w, 201, map[string]any{"ok": true})
+		default:
+			w.WriteHeader(http.StatusMethodNotAllowed)
+		}
+	})
+
+	api.HandleFunc("/api/chains", func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			rows, _ := app.db.Query(`SELECT id,name,path,protocol,enabled,description,created_at FROM chains ORDER BY id DESC`)
+			defer rows.Close()
+			out := []map[string]any{}
+			for rows.Next() {
+				var id int64
+				var name, path, protocol, desc string
+				var enabled bool
+				var created time.Time
+				_ = rows.Scan(&id, &name, &path, &protocol, &enabled, &desc, &created)
+				out = append(out, map[string]any{"id": id, "name": name, "path": path, "protocol": protocol, "enabled": enabled, "description": desc, "createdAt": created})
+			}
+			writeJSON(w, 200, out)
+		case http.MethodPost:
+			var req struct { Name, Path, Protocol string }
+			if json.NewDecoder(r.Body).Decode(&req) != nil || req.Name == "" || req.Path == "" || req.Protocol == "" { writeJSON(w, 400, map[string]string{"error": "invalid payload"}); return }
+			_, err := app.db.Exec(`INSERT INTO chains(name,path,protocol,enabled,description) VALUES($1,$2,$3,false,'pending orchestration')`, req.Name, req.Path, req.Protocol)
+			if err != nil { writeJSON(w, 500, map[string]string{"error": err.Error()}); return }
+			writeJSON(w, 201, map[string]any{"ok": true})
+		default:
+			w.WriteHeader(http.StatusMethodNotAllowed)
+		}
 	})
 
 	api.HandleFunc("/api/settings/alerts", func(w http.ResponseWriter, r *http.Request) {

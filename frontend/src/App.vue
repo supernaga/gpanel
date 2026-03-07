@@ -14,14 +14,15 @@
 
   <div v-else class="layout">
     <aside class="sidebar">
-      <h2>GOST 管理面板</h2>
+      <h2>GPanel</h2>
       <button :class="{active:tab==='dashboard'}" @click="tab='dashboard'">仪表盘</button>
-      <button :class="{active:tab==='nodes'}" @click="tab='nodes'">节点管理</button>
-      <button :class="{active:tab==='clients'}" @click="tab='clients'">客户端管理</button>
-      <button :class="{active:tab==='forwards'}" @click="tab='forwards'">端口转发</button>
-      <button :class="{active:tab==='rules'}" @click="tab='rules'">规则管理</button>
-      <button :class="{active:tab==='alerts'}" @click="tab='alerts'">告警通知</button>
-      <button v-if="isAdmin" :class="{active:tab==='tasks'}" @click="tab='tasks'">Agent任务</button>
+      <button :class="{active:tab==='nodes'}" @click="tab='nodes'">节点</button>
+      <button :class="{active:tab==='forwards'}" @click="tab='forwards'">转发</button>
+      <button :class="{active:tab==='tunnels'}" @click="tab='tunnels'">隧道</button>
+      <button :class="{active:tab==='chains'}" @click="tab='chains'">链路</button>
+      <button :class="{active:tab==='runtime'}" @click="tab='runtime'">运行态</button>
+      <button :class="{active:tab==='tasks'}" @click="tab='tasks'">任务</button>
+      <button :class="{active:tab==='alerts'}" @click="tab='alerts'">告警</button>
       <button v-if="isAdmin" :class="{active:tab==='users'}" @click="tab='users'">用户与审计</button>
       <button @click="logout">退出登录</button>
     </aside>
@@ -29,11 +30,12 @@
     <main class="content">
       <DashboardView v-if="tab==='dashboard'" />
       <NodesView v-else-if="tab==='nodes'" />
-      <ClientsView v-else-if="tab==='clients'" />
       <ForwardsView v-else-if="tab==='forwards'" />
-      <RulesView v-else-if="tab==='rules'" />
-      <AlertsView v-else-if="tab==='alerts'" />
+      <TunnelsView v-else-if="tab==='tunnels'" />
+      <ChainsView v-else-if="tab==='chains'" />
+      <RuntimeView v-else-if="tab==='runtime'" />
       <AgentTasksView v-else-if="tab==='tasks'" />
+      <AlertsView v-else-if="tab==='alerts'" />
       <UsersAuditView v-else />
     </main>
   </div>
@@ -44,11 +46,12 @@ import { computed, ref } from 'vue'
 import { api } from './api/client'
 import DashboardView from './views/DashboardView.vue'
 import NodesView from './views/NodesView.vue'
-import ClientsView from './views/ClientsView.vue'
 import ForwardsView from './views/ForwardsView.vue'
-import RulesView from './views/RulesView.vue'
-import AlertsView from './views/AlertsView.vue'
+import TunnelsView from './views/TunnelsView.vue'
+import ChainsView from './views/ChainsView.vue'
+import RuntimeView from './views/RuntimeView.vue'
 import AgentTasksView from './views/AgentTasksView.vue'
+import AlertsView from './views/AlertsView.vue'
 import UsersAuditView from './views/UsersAuditView.vue'
 
 const tab = ref('dashboard')

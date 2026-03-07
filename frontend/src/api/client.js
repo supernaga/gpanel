@@ -17,6 +17,13 @@ export const api = {
   login: (payload) => req('/api/auth/login', { method: 'POST', body: JSON.stringify(payload), headers: {} }),
 
   summary: () => req('/api/dashboard/summary'),
+  runtimeSummary: () => req('/api/runtime/summary'),
+
+  tunnels: () => req('/api/tunnels'),
+  addTunnel: (payload) => req('/api/tunnels', { method: 'POST', body: JSON.stringify(payload) }),
+
+  chains: () => req('/api/chains'),
+  addChain: (payload) => req('/api/chains', { method: 'POST', body: JSON.stringify(payload) }),
 
   users: () => req('/api/users'),
   addUser: (payload) => req('/api/users', { method: 'POST', body: JSON.stringify(payload) }),
