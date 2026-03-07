@@ -36,13 +36,18 @@ jobs:
           docker build -t $IMAGE_PREFIX-web:latest ./frontend
           docker push $IMAGE_PREFIX-web:latest
 
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+
       - name: Build agent binaries
         run: |
           mkdir -p dist
-          docker run --rm -v "$PWD/agent:/src" -v "$PWD/dist:/out" -w /src golang:1.22 sh -lc '
-            go mod download && \
-            CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o /out/gpanel-agent-linux-amd64 main.go && \
-            CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o /out/gpanel-agent-linux-arm64 main.go'
+          cd agent
+          go mod download
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o ../dist/gpanel-agent-linux-amd64 main.go
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o ../dist/gpanel-agent-linux-arm64 main.go
 
       - name: Publish agent binaries to release assets
         uses: softprops/action-gh-release@v2
