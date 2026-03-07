@@ -40,14 +40,21 @@ curl -fsSL https://raw.githubusercontent.com/supernaga/gpanel/main/deploy/instal
 
 ---
 
-## 节点接入
+## 节点接入（宿主机 Agent，推荐）
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/supernaga/gpanel/main/deploy/install-agent.sh | bash -s -- \
-  --panel http://<PANEL_IP>:8080 \
+  --panel http://<PANEL_IP> \
   --token <AGENT_TOKEN> \
   --name node-01
 ```
+
+安装后会在节点主机上创建：
+- `/usr/local/bin/gpanel-agent`
+- `/etc/gpanel/agent.env`
+- `gpanel-agent.service`
+
+随后面板下发的 `gost.install / gost.apply_tunnel / gost.apply_forward / gost.start/stop/restart/status` 都会直接作用于宿主机。
 
 ---
 

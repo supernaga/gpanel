@@ -12,7 +12,7 @@ jobs:
   build-and-push:
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      contents: write
       packages: write
 
     steps:
@@ -35,6 +35,22 @@ jobs:
         run: |
           docker build -t $IMAGE_PREFIX-web:latest ./frontend
           docker push $IMAGE_PREFIX-web:latest
+
+      - name: Build agent binaries
+        run: |
+          mkdir -p dist
+          docker run --rm -v "$PWD/agent:/src" -v "$PWD/dist:/out" -w /src golang:1.22 sh -lc '
+            go mod download && \
+            CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o /out/gpanel-agent-linux-amd64 main.go && \
+            CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o /out/gpanel-agent-linux-arm64 main.go'
+
+      - name: Publish agent binaries to release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest-agent
+          files: |
+            dist/gpanel-agent-linux-amd64
+            dist/gpanel-agent-linux-arm64
 
       - name: Build & Push agent
         run: |
