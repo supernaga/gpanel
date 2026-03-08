@@ -710,6 +710,37 @@ ORDER BY priority DESC, id LIMIT 1 FOR UPDATE SKIP LOCKED`
 		writeJSON(w, 200, map[string]int{"nodes": nodes, "forwards": forwards, "tunnels": tunnels, "chains": chains})
 	})
 
+	api.HandleFunc("/api/runtime/details", func(w http.ResponseWriter, r *http.Request) {
+		nodeRows, _ := app.db.Query(`SELECT id,name,region,status,latency_ms,version,updated_at FROM nodes ORDER BY updated_at DESC, id ASC LIMIT 20`)
+		defer nodeRows.Close()
+		nodes := []Node{}
+		for nodeRows.Next() {
+			var n Node
+			_ = nodeRows.Scan(&n.ID, &n.Name, &n.Region, &n.Status, &n.LatencyMs, &n.Version, &n.UpdatedAt)
+			nodes = append(nodes, n)
+		}
+
+		chainRows, _ := app.db.Query(`SELECT id,name,path,protocol,enabled,description,created_at FROM chains ORDER BY id DESC LIMIT 20`)
+		defer chainRows.Close()
+		chains := []Chain{}
+		for chainRows.Next() {
+			var c Chain
+			_ = chainRows.Scan(&c.ID, &c.Name, &c.Path, &c.Protocol, &c.Enabled, &c.Description, &c.CreatedAt)
+			chains = append(chains, c)
+		}
+
+		taskRows, _ := app.db.Query(`SELECT id,node_uid,node_name,command,payload,status,result,retry_count,max_retries,timeout_seconds,priority,created_at,dispatched_at,done_at FROM agent_tasks ORDER BY id DESC LIMIT 20`)
+		defer taskRows.Close()
+		tasks := []AgentTask{}
+		for taskRows.Next() {
+			var t AgentTask
+			_ = taskRows.Scan(&t.ID, &t.NodeUID, &t.NodeName, &t.Command, &t.Payload, &t.Status, &t.Result, &t.RetryCount, &t.MaxRetries, &t.TimeoutSecs, &t.Priority, &t.CreatedAt, &t.Dispatched, &t.DoneAt)
+			tasks = append(tasks, t)
+		}
+
+		writeJSON(w, 200, map[string]any{"nodes": nodes, "chains": chains, "tasks": tasks})
+	})
+
 	api.HandleFunc("/api/tunnels", func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodGet:

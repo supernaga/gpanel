@@ -18,6 +18,7 @@ export const api = {
 
   summary: () => req('/api/dashboard/summary'),
   runtimeSummary: () => req('/api/runtime/summary'),
+  runtimeDetails: () => req('/api/runtime/details'),
 
   tunnels: () => req('/api/tunnels'),
   addTunnel: (payload) => req('/api/tunnels', { method: 'POST', body: JSON.stringify(payload) }),
