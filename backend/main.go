@@ -760,7 +760,51 @@ ORDER BY priority DESC, id LIMIT 1 FOR UPDATE SKIP LOCKED`
 			}
 			_, err := app.db.Exec(`INSERT INTO chains(name,path,protocol,enabled,description) VALUES($1,$2,$3,$4,$5)`, req.Name, req.Path, req.Protocol, enabled, description)
 			if err != nil { writeJSON(w, 500, map[string]string{"error": err.Error()}); return }
+			app.audit(r.Context(), "chain.create", fmt.Sprintf("chain/%s", req.Name), description)
 			writeJSON(w, 201, map[string]any{"ok": true, "enabled": enabled, "description": description})
+		default:
+			w.WriteHeader(http.StatusMethodNotAllowed)
+		}
+	})
+
+	api.HandleFunc("/api/chains/", func(w http.ResponseWriter, r *http.Request) {
+		parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+		if len(parts) != 4 || parts[0] != "api" || parts[1] != "chains" {
+			writeJSON(w, 400, map[string]string{"error": "bad path"})
+			return
+		}
+		id, err := strconv.ParseInt(parts[2], 10, 64)
+		if err != nil {
+			writeJSON(w, 400, map[string]string{"error": "invalid id"})
+			return
+		}
+		action := parts[3]
+		switch {
+		case action == "update" && r.Method == http.MethodPatch:
+			var req struct { Name, Path, Protocol string }
+			if json.NewDecoder(r.Body).Decode(&req) != nil { writeJSON(w, 400, map[string]string{"error": "invalid payload"}); return }
+			_, err := app.db.Exec(`UPDATE chains SET name=COALESCE(NULLIF($2,''),name), path=COALESCE(NULLIF($3,''),path), protocol=COALESCE(NULLIF($4,''),protocol), description='updated', enabled=false WHERE id=$1`, id, req.Name, req.Path, req.Protocol)
+			if err != nil { writeJSON(w, 500, map[string]string{"error": err.Error()}); return }
+			app.audit(r.Context(), "chain.update", fmt.Sprintf("chain/%d", id), "updated")
+			writeJSON(w, 200, map[string]any{"ok": true})
+		case action == "delete" && r.Method == http.MethodDelete:
+			res, _ := app.db.Exec(`DELETE FROM chains WHERE id=$1`, id)
+			aff, _ := res.RowsAffected()
+			if aff == 0 { writeJSON(w, 404, map[string]string{"error": "chain not found"}); return }
+			app.audit(r.Context(), "chain.delete", fmt.Sprintf("chain/%d", id), "deleted")
+			writeJSON(w, 200, map[string]any{"ok": true})
+		case action == "toggle" && r.Method == http.MethodPatch:
+			var chain Chain
+			err := app.db.QueryRow(`SELECT id,name,path,protocol,enabled,description,created_at FROM chains WHERE id=$1`, id).Scan(&chain.ID, &chain.Name, &chain.Path, &chain.Protocol, &chain.Enabled, &chain.Description, &chain.CreatedAt)
+			if err != nil { writeJSON(w, 404, map[string]string{"error": "chain not found"}); return }
+			enabled := !chain.Enabled
+			description := chain.Description
+			if enabled {
+				if err := orchestrateChain(chain.Name, chain.Path, chain.Protocol); err == nil { description = "tasks scheduled" } else { description = err.Error(); enabled = false }
+			}
+			_, _ = app.db.Exec(`UPDATE chains SET enabled=$2, description=$3 WHERE id=$1`, id, enabled, description)
+			app.audit(r.Context(), "chain.toggle", fmt.Sprintf("chain/%d", id), fmt.Sprintf("enabled=%v", enabled))
+			writeJSON(w, 200, map[string]any{"ok": true, "enabled": enabled, "description": description})
 		default:
 			w.WriteHeader(http.StatusMethodNotAllowed)
 		}

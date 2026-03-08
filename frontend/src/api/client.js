@@ -24,6 +24,9 @@ export const api = {
 
   chains: () => req('/api/chains'),
   addChain: (payload) => req('/api/chains', { method: 'POST', body: JSON.stringify(payload) }),
+  updateChain: (id, payload) => req(`/api/chains/${id}/update`, { method: 'PATCH', body: JSON.stringify(payload) }),
+  deleteChain: (id) => req(`/api/chains/${id}/delete`, { method: 'DELETE' }),
+  toggleChain: (id) => req(`/api/chains/${id}/toggle`, { method: 'PATCH' }),
 
   users: () => req('/api/users'),
   addUser: (payload) => req('/api/users', { method: 'POST', body: JSON.stringify(payload) }),
