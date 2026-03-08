@@ -674,6 +674,12 @@ ORDER BY priority DESC, id LIMIT 1 FOR UPDATE SKIP LOCKED`
 		err := app.db.QueryRow(`SELECT name FROM nodes WHERE id=$1`, nodeID).Scan(&nodeName)
 		return nodeName, err
 	}
+	scheduleForward := func(nodeName, forwardName, protocol, listenAddr, targetAddr string) error {
+		return createNodeTask(nodeName, "gost.apply_forward", map[string]any{"name": forwardName, "protocol": protocol, "listen": listenAddr, "target": targetAddr})
+	}
+	scheduleTunnel := func(nodeName, tunnelName, mode, listen string) error {
+		return createNodeTask(nodeName, "gost.apply_tunnel", map[string]any{"name": tunnelName, "mode": mode, "listen": listen})
+	}
 	orchestrateChain := func(chainName, path, protocol string) error {
 		hops := []string{}
 		for _, part := range strings.Split(path, "->") {
@@ -685,7 +691,7 @@ ORDER BY priority DESC, id LIMIT 1 FOR UPDATE SKIP LOCKED`
 			stepName := fmt.Sprintf("%s-hop-%d", chainName, i+1)
 			listen := fmt.Sprintf(":%d", 13000+i)
 			target := fmt.Sprintf("%s:%d", hops[i+1], 13000+i)
-			if err := createNodeTask(hops[i], "gost.apply_forward", map[string]any{"name": stepName, "protocol": protocol, "listen": listen, "target": target}); err != nil {
+			if err := scheduleForward(hops[i], stepName, protocol, listen, target); err != nil {
 				return err
 			}
 		}
@@ -738,7 +744,9 @@ ORDER BY priority DESC, id LIMIT 1 FOR UPDATE SKIP LOCKED`
 			tasks = append(tasks, t)
 		}
 
-		writeJSON(w, 200, map[string]any{"nodes": nodes, "chains": chains, "tasks": tasks})
+		var pending, running, done, failed int
+		_ = app.db.QueryRow(`SELECT COUNT(*) FILTER (WHERE status='pending'), COUNT(*) FILTER (WHERE status='running'), COUNT(*) FILTER (WHERE status='done'), COUNT(*) FILTER (WHERE status='failed') FROM agent_tasks`).Scan(&pending, &running, &done, &failed)
+		writeJSON(w, 200, map[string]any{"nodes": nodes, "chains": chains, "tasks": tasks, "taskStats": map[string]int{"pending": pending, "running": running, "done": done, "failed": failed}})
 	})
 
 	api.HandleFunc("/api/tunnels", func(w http.ResponseWriter, r *http.Request) {
@@ -760,7 +768,7 @@ ORDER BY priority DESC, id LIMIT 1 FOR UPDATE SKIP LOCKED`
 			if err != nil { writeJSON(w, 500, map[string]string{"error": err.Error()}); return }
 			nodeName, err := mustNodeName(req.NodeID)
 			if err == nil {
-				_ = createNodeTask(nodeName, "gost.apply_tunnel", map[string]any{"name": req.Name, "mode": req.Mode, "listen": req.Listen})
+				_ = scheduleTunnel(nodeName, req.Name, req.Mode, req.Listen)
 			}
 			writeJSON(w, 201, map[string]any{"ok": true})
 		default:
@@ -1246,9 +1254,10 @@ ORDER BY priority DESC, id LIMIT 1 FOR UPDATE SKIP LOCKED`
 				writeJSON(w, 500, map[string]string{"error": err.Error()})
 				return
 			}
-			var nodeName string
-			_ = app.db.QueryRow(`SELECT name FROM nodes WHERE id=$1`, req.NodeID).Scan(&nodeName)
-			_ = createNodeTask(nodeName, "gost.apply_forward", map[string]any{"name": req.Name, "protocol": req.Protocol, "listen": req.ListenAddr, "target": req.TargetAddr})
+			nodeName, err := mustNodeName(req.NodeID)
+			if err == nil {
+				_ = scheduleForward(nodeName, req.Name, req.Protocol, req.ListenAddr, req.TargetAddr)
+			}
 			app.audit(r.Context(), "forward.create", fmt.Sprintf("forward/%d", f.ID), f.Name)
 			writeJSON(w, 201, f)
 		default:

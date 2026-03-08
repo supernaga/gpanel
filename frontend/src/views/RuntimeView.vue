@@ -15,6 +15,13 @@
       <div class="card"><p>链路数</p><strong>{{ summary.chains }}</strong></div>
     </div>
 
+    <div class="cards" style="margin-top:16px">
+      <div class="card"><p>待执行任务</p><strong>{{ details.taskStats.pending || 0 }}</strong></div>
+      <div class="card"><p>运行中任务</p><strong>{{ details.taskStats.running || 0 }}</strong></div>
+      <div class="card"><p>完成任务</p><strong>{{ details.taskStats.done || 0 }}</strong></div>
+      <div class="card"><p>失败任务</p><strong class="danger">{{ details.taskStats.failed || 0 }}</strong></div>
+    </div>
+
     <div class="toolbar" style="margin-top:20px"><h2>节点状态</h2></div>
     <table>
       <thead><tr><th>节点</th><th>地域</th><th>状态</th><th>延迟</th><th>版本</th><th>更新时间</th></tr></thead>
@@ -66,7 +73,7 @@ import { onMounted, ref } from 'vue'
 import { api } from '../api/client'
 
 const summary = ref({ nodes: 0, forwards: 0, tunnels: 0, chains: 0 })
-const details = ref({ nodes: [], chains: [], tasks: [] })
+const details = ref({ nodes: [], chains: [], tasks: [], taskStats: { pending: 0, running: 0, done: 0, failed: 0 } })
 const formatTime = (value) => value ? new Date(value).toLocaleString() : '-'
 const load = async () => {
   const [s, d] = await Promise.all([api.runtimeSummary(), api.runtimeDetails()])
