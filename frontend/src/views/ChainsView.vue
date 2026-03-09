@@ -141,6 +141,14 @@ const createChain = async () => {
   await load()
 }
 const createTwoNodeChain = async () => {
+  if (!twoNodeForm.value.forwardNodeId || !twoNodeForm.value.tunnelNodeId) {
+    alert('请选择 forward 节点和 tunnel 节点')
+    return
+  }
+  if (!twoNodeForm.value.listenAddr || !twoNodeForm.value.targetAddr || !twoNodeForm.value.tunnelListen) {
+    alert('请填写监听地址、目标地址和 tunnel 监听地址')
+    return
+  }
   await api.addChain({
     name: twoNodeForm.value.name,
     protocol: form.value.protocol,
