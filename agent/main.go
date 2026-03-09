@@ -160,8 +160,16 @@ func installGost() (string, error) {
 		return "gost already installed in PATH", nil
 	}
 	arch := map[string]string{"x86_64":"amd64","aarch64":"arm64"}[strings.TrimSpace(run("uname -m"))]
-	if arch == "" { arch = "amd64" }
-	url := fmt.Sprintf("https://github.com/go-gost/gost/releases/latest/download/gost_3.0.0_linux_%s.tar.gz", arch)
+	if arch == "" {
+		arch = "amd64"
+	}
+	tag := strings.TrimSpace(run("curl -fsSL https://api.github.com/repos/go-gost/gost/releases/latest | sed -n 's/.*\"tag_name\": \"\\([^\"]*\\)\".*/\\1/p' | head -n 1"))
+	if tag == "" {
+		return "", fmt.Errorf("failed to resolve latest gost release tag")
+	}
+	version := strings.TrimPrefix(tag, "v")
+	asset := fmt.Sprintf("gost_%s_linux_%s.tar.gz", version, arch)
+	url := fmt.Sprintf("https://github.com/go-gost/gost/releases/download/%s/%s", tag, asset)
 	cmd := fmt.Sprintf("set -e; tmpdir=$(mktemp -d); cd \"$tmpdir\"; curl -fsSL -o gost.tgz %s; tar -xzf gost.tgz; install -m 0755 gost /usr/local/bin/gost", shellEscape(url))
 	out := run(cmd)
 	if err := cmdErr(cmd); err != nil {
@@ -170,7 +178,7 @@ func installGost() (string, error) {
 	if _, err := os.Stat("/usr/local/bin/gost"); err != nil {
 		return out, fmt.Errorf("gost install finished but /usr/local/bin/gost not found")
 	}
-	return out + "\ninstalled /usr/local/bin/gost", nil
+	return strings.TrimSpace(out+"\ninstalled /usr/local/bin/gost from "+url), nil
 }
 
 func ensureGostAndRun(fn func() (string, error)) (string, error) {
