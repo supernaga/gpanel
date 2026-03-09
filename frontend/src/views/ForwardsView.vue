@@ -12,7 +12,7 @@
       </form>
     </div>
     <table>
-      <thead><tr><th>ID</th><th>名称</th><th>监听</th><th>目标</th><th>协议</th><th>节点</th><th>状态</th><th>连接数</th><th>操作</th></tr></thead>
+      <thead><tr><th>ID</th><th>名称</th><th>监听</th><th>目标</th><th>协议</th><th>节点</th><th>期望状态</th><th>实际状态</th><th>服务</th><th>连接数</th><th>操作</th></tr></thead>
       <tbody>
         <tr v-for="r in rows" :key="r.id">
           <td>{{ r.id }}</td>
@@ -20,8 +20,10 @@
           <td><template v-if="editingId===r.id"><input v-model="editForm.listenAddr" /></template><template v-else>{{ r.listenAddr }}</template></td>
           <td><template v-if="editingId===r.id"><input v-model="editForm.targetAddr" /></template><template v-else>{{ r.targetAddr }}</template></td>
           <td><template v-if="editingId===r.id"><input v-model="editForm.protocol" /></template><template v-else>{{ r.protocol }}</template></td>
-          <td><template v-if="editingId===r.id"><input v-model.number="editForm.nodeId" type="number" min="1" /></template><template v-else>{{ r.nodeId }}</template></td>
+          <td><template v-if="editingId===r.id"><input v-model.number="editForm.nodeId" type="number" min="1" /></template><template v-else>{{ forwardState(r.id)?.nodeName || r.nodeId }}</template></td>
           <td><span :class="['badge', r.status==='enabled'?'online':'offline']">{{ r.status }}</span></td>
+          <td><span :class="['badge', forwardMismatch(r) ? 'offline' : (forwardState(r.id)?.actualRunning ? 'online' : '')]">{{ forwardState(r.id)?.actualRunning ? 'running' : 'not-running' }}</span></td>
+          <td>{{ forwardState(r.id)?.serviceName || '-' }}</td>
           <td>{{ r.connections }}</td>
           <td>
             <button @click="toggle(r.id)">{{ r.status==='enabled' ? '停用' : '启用' }}</button>
@@ -40,10 +42,21 @@
 import { onMounted, ref } from 'vue'
 import { api } from '../api/client'
 const rows = ref([])
+const runtime = ref({ forwardStates: [] })
 const form = ref({ name: '', listenAddr: ':9000', targetAddr: '127.0.0.1:80', protocol: 'tcp', nodeId: 1 })
 const editingId = ref(null)
 const editForm = ref({ name: '', listenAddr: '', targetAddr: '', protocol: 'tcp', nodeId: 1 })
-const load = async () => rows.value = await api.forwards()
+const forwardState = (id) => (runtime.value.forwardStates || []).find(item => item.id === id)
+const forwardMismatch = (row) => {
+  const state = forwardState(row.id)
+  if (!state) return false
+  return row.status === 'enabled' ? !state.actualRunning : state.actualRunning
+}
+const load = async () => {
+  const [forwards, details] = await Promise.all([api.forwards(), api.runtimeDetails()])
+  rows.value = forwards
+  runtime.value = details
+}
 const create = async () => { await api.addForward(form.value); await load() }
 const toggle = async (id) => { await api.toggleForward(id); await load() }
 const startEdit = (r) => {
