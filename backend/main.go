@@ -770,7 +770,51 @@ ORDER BY priority DESC, id LIMIT 1 FOR UPDATE SKIP LOCKED`
 			if err == nil {
 				_ = scheduleTunnel(nodeName, req.Name, req.Mode, req.Listen)
 			}
+			app.audit(r.Context(), "tunnel.create", fmt.Sprintf("tunnel/%s", req.Name), req.Mode)
 			writeJSON(w, 201, map[string]any{"ok": true})
+		default:
+			w.WriteHeader(http.StatusMethodNotAllowed)
+		}
+	})
+
+	api.HandleFunc("/api/tunnels/", func(w http.ResponseWriter, r *http.Request) {
+		parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+		if len(parts) != 4 || parts[0] != "api" || parts[1] != "tunnels" {
+			writeJSON(w, 400, map[string]string{"error": "bad path"})
+			return
+		}
+		id, err := strconv.ParseInt(parts[2], 10, 64)
+		if err != nil {
+			writeJSON(w, 400, map[string]string{"error": "invalid id"})
+			return
+		}
+		action := parts[3]
+		switch {
+		case action == "update" && r.Method == http.MethodPatch:
+			var req struct { Name, Mode, Listen string; NodeID int64 }
+			if json.NewDecoder(r.Body).Decode(&req) != nil { writeJSON(w, 400, map[string]string{"error": "invalid payload"}); return }
+			_, err := app.db.Exec(`UPDATE tunnels SET name=COALESCE(NULLIF($2,''),name), mode=COALESCE(NULLIF($3,''),mode), listen=COALESCE(NULLIF($4,''),listen), node_id=COALESCE(NULLIF($5,0),node_id), description='updated' WHERE id=$1`, id, req.Name, req.Mode, req.Listen, req.NodeID)
+			if err != nil { writeJSON(w, 500, map[string]string{"error": err.Error()}); return }
+			app.audit(r.Context(), "tunnel.update", fmt.Sprintf("tunnel/%d", id), "updated")
+			writeJSON(w, 200, map[string]any{"ok": true})
+		case action == "delete" && r.Method == http.MethodDelete:
+			res, _ := app.db.Exec(`DELETE FROM tunnels WHERE id=$1`, id)
+			aff, _ := res.RowsAffected()
+			if aff == 0 { writeJSON(w, 404, map[string]string{"error": "tunnel not found"}); return }
+			app.audit(r.Context(), "tunnel.delete", fmt.Sprintf("tunnel/%d", id), "deleted")
+			writeJSON(w, 200, map[string]any{"ok": true})
+		case action == "toggle" && r.Method == http.MethodPatch:
+			var t Tunnel
+			err := app.db.QueryRow(`SELECT id,name,mode,listen,node_id,enabled,description,created_at FROM tunnels WHERE id=$1`, id).Scan(&t.ID, &t.Name, &t.Mode, &t.Listen, &t.NodeID, &t.Enabled, &t.Description, &t.CreatedAt)
+			if err != nil { writeJSON(w, 404, map[string]string{"error": "tunnel not found"}); return }
+			enabled := !t.Enabled
+			_, _ = app.db.Exec(`UPDATE tunnels SET enabled=$2, description=$3 WHERE id=$1`, id, enabled, map[bool]string{true:"enabled", false:"disabled"}[enabled])
+			nodeName, err := mustNodeName(t.NodeID)
+			if err == nil {
+				if enabled { _ = createNodeTask(nodeName, "gost.start", map[string]any{"name": t.Name}) } else { _ = createNodeTask(nodeName, "gost.stop", map[string]any{"name": t.Name}) }
+			}
+			app.audit(r.Context(), "tunnel.toggle", fmt.Sprintf("tunnel/%d", id), fmt.Sprintf("enabled=%v", enabled))
+			writeJSON(w, 200, map[string]any{"ok": true, "enabled": enabled})
 		default:
 			w.WriteHeader(http.StatusMethodNotAllowed)
 		}

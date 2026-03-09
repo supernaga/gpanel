@@ -17,15 +17,27 @@
     </div>
 
     <table>
-      <thead><tr><th>名称</th><th>模式</th><th>监听</th><th>节点</th><th>状态</th><th>说明</th></tr></thead>
+      <thead><tr><th>名称</th><th>模式</th><th>监听</th><th>节点</th><th>状态</th><th>说明</th><th>操作</th></tr></thead>
       <tbody>
         <tr v-for="t in tunnels" :key="t.id">
-          <td>{{ t.name }}</td>
-          <td>{{ t.mode }}</td>
-          <td>{{ t.listen }}</td>
-          <td>{{ nodeName(t.nodeId) }}</td>
+          <td><template v-if="editingId===t.id"><input v-model="editForm.name" /></template><template v-else>{{ t.name }}</template></td>
+          <td><template v-if="editingId===t.id"><select v-model="editForm.mode"><option value="socks5">socks5</option><option value="http">http</option></select></template><template v-else>{{ t.mode }}</template></td>
+          <td><template v-if="editingId===t.id"><input v-model="editForm.listen" /></template><template v-else>{{ t.listen }}</template></td>
+          <td>
+            <template v-if="editingId===t.id">
+              <select v-model.number="editForm.nodeId"><option v-for="n in nodes" :key="n.id" :value="n.id">{{ n.name }}</option></select>
+            </template>
+            <template v-else>{{ nodeName(t.nodeId) }}</template>
+          </td>
           <td><span :class="['badge', t.enabled ? 'online' : 'offline']">{{ t.enabled ? 'enabled' : 'disabled' }}</span></td>
           <td>{{ t.description || '-' }}</td>
+          <td>
+            <button @click="toggleTunnel(t.id)">{{ t.enabled ? '停用' : '启用' }}</button>
+            <button v-if="editingId !== t.id" @click="startEdit(t)">编辑</button>
+            <button v-else @click="saveEdit(t.id)">保存</button>
+            <button v-if="editingId === t.id" @click="cancelEdit">取消</button>
+            <button @click="removeTunnel(t.id)">删除</button>
+          </td>
         </tr>
       </tbody>
     </table>
@@ -39,6 +51,8 @@ import { api } from '../api/client'
 const nodes = ref([])
 const tunnels = ref([])
 const form = ref({ name: '', mode: 'socks5', listen: ':1080', nodeId: 0 })
+const editingId = ref(null)
+const editForm = ref({ name: '', mode: 'socks5', listen: ':1080', nodeId: 0 })
 
 const nodeName = (id) => nodes.value.find((n) => n.id === id)?.name || `#${id}`
 const load = async () => {
@@ -51,6 +65,22 @@ const createTunnel = async () => {
   form.value = { ...form.value, name: '', listen: ':1080' }
   await load()
 }
+const startEdit = (t) => {
+  editingId.value = t.id
+  editForm.value = { name: t.name, mode: t.mode, listen: t.listen, nodeId: t.nodeId }
+}
+const cancelEdit = () => { editingId.value = null }
+const saveEdit = async (id) => {
+  await api.updateTunnel(id, editForm.value)
+  editingId.value = null
+  await load()
+}
+const removeTunnel = async (id) => {
+  if (!confirm(`确认删除隧道 #${id} 吗？`)) return
+  await api.deleteTunnel(id)
+  await load()
+}
+const toggleTunnel = async (id) => { await api.toggleTunnel(id); await load() }
 
 onMounted(load)
 </script>

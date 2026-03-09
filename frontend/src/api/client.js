@@ -22,6 +22,9 @@ export const api = {
 
   tunnels: () => req('/api/tunnels'),
   addTunnel: (payload) => req('/api/tunnels', { method: 'POST', body: JSON.stringify(payload) }),
+  updateTunnel: (id, payload) => req(`/api/tunnels/${id}/update`, { method: 'PATCH', body: JSON.stringify(payload) }),
+  deleteTunnel: (id) => req(`/api/tunnels/${id}/delete`, { method: 'DELETE' }),
+  toggleTunnel: (id) => req(`/api/tunnels/${id}/toggle`, { method: 'PATCH' }),
 
   chains: () => req('/api/chains'),
   addChain: (payload) => req('/api/chains', { method: 'POST', body: JSON.stringify(payload) }),
