@@ -726,6 +726,24 @@ ORDER BY priority DESC, id LIMIT 1 FOR UPDATE SKIP LOCKED`
 			nodes = append(nodes, n)
 		}
 
+		forwardRows, _ := app.db.Query(`SELECT id,name,listen_addr,target_addr,protocol,status,node_id,connections,updated_at FROM forwards ORDER BY id DESC LIMIT 20`)
+		defer forwardRows.Close()
+		forwards := []ForwardRule{}
+		for forwardRows.Next() {
+			var f ForwardRule
+			_ = forwardRows.Scan(&f.ID, &f.Name, &f.ListenAddr, &f.TargetAddr, &f.Protocol, &f.Status, &f.NodeID, &f.Connections, &f.UpdatedAt)
+			forwards = append(forwards, f)
+		}
+
+		tunnelRows, _ := app.db.Query(`SELECT id,name,mode,listen,node_id,enabled,description,created_at FROM tunnels ORDER BY id DESC LIMIT 20`)
+		defer tunnelRows.Close()
+		tunnels := []Tunnel{}
+		for tunnelRows.Next() {
+			var t Tunnel
+			_ = tunnelRows.Scan(&t.ID, &t.Name, &t.Mode, &t.Listen, &t.NodeID, &t.Enabled, &t.Description, &t.CreatedAt)
+			tunnels = append(tunnels, t)
+		}
+
 		chainRows, _ := app.db.Query(`SELECT id,name,path,protocol,enabled,description,created_at FROM chains ORDER BY id DESC LIMIT 20`)
 		defer chainRows.Close()
 		chains := []Chain{}
@@ -746,7 +764,7 @@ ORDER BY priority DESC, id LIMIT 1 FOR UPDATE SKIP LOCKED`
 
 		var pending, running, done, failed int
 		_ = app.db.QueryRow(`SELECT COUNT(*) FILTER (WHERE status='pending'), COUNT(*) FILTER (WHERE status='running'), COUNT(*) FILTER (WHERE status='done'), COUNT(*) FILTER (WHERE status='failed') FROM agent_tasks`).Scan(&pending, &running, &done, &failed)
-		writeJSON(w, 200, map[string]any{"nodes": nodes, "chains": chains, "tasks": tasks, "taskStats": map[string]int{"pending": pending, "running": running, "done": done, "failed": failed}})
+		writeJSON(w, 200, map[string]any{"nodes": nodes, "forwards": forwards, "tunnels": tunnels, "chains": chains, "tasks": tasks, "taskStats": map[string]int{"pending": pending, "running": running, "done": done, "failed": failed}})
 	})
 
 	api.HandleFunc("/api/tunnels", func(w http.ResponseWriter, r *http.Request) {
