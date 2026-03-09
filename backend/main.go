@@ -968,10 +968,10 @@ ORDER BY priority DESC, id LIMIT 1 FOR UPDATE SKIP LOCKED`
 						return
 					}
 				}
-				req.Path = strings.Join(segments, ",")
+				req.Path = strings.Join(segments, " -> ")
 				req.Protocol = firstNonEmpty(strings.TrimSpace(req.Protocol), proto)
 			}
-			if strings.TrimSpace(req.Path) == "" || strings.TrimSpace(req.Protocol) == "" {
+			if strings.TrimSpace(req.Path) == "" {
 				writeJSON(w, 400, map[string]string{"error": "invalid payload"})
 				return
 			}
