@@ -14,7 +14,7 @@
     </div>
 
     <table>
-      <thead><tr><th>名称</th><th>路径</th><th>协议</th><th>状态</th><th>说明</th><th>操作</th></tr></thead>
+      <thead><tr><th>名称</th><th>路径</th><th>协议</th><th>期望状态</th><th>实际状态</th><th>说明</th><th>操作</th></tr></thead>
       <tbody>
         <tr v-for="c in chains" :key="c.id">
           <td>
@@ -32,6 +32,7 @@
             <template v-else>{{ c.protocol }}</template>
           </td>
           <td><span :class="['badge', c.enabled ? 'online' : 'offline']">{{ c.enabled ? 'enabled' : 'draft' }}</span></td>
+          <td><span :class="['badge', chainMismatch(c) ? 'offline' : (chainState(c.id)?.allRunning ? 'online' : '')]">{{ chainState(c.id)?.allRunning ? 'all-running' : 'partial' }}</span></td>
           <td>{{ c.description || '待绑定真实节点任务' }}</td>
           <td>
             <button @click="toggle(c.id)">{{ c.enabled ? '停用' : '启用' }}</button>
@@ -43,19 +44,54 @@
         </tr>
       </tbody>
     </table>
+
+    <div class="toolbar" style="margin-top:20px"><h2>Hop 运行状态</h2></div>
+    <table>
+      <thead><tr><th>链路</th><th>Hop</th><th>节点</th><th>服务</th><th>状态</th></tr></thead>
+      <tbody>
+        <tr v-for="row in chainHopRows" :key="row.key">
+          <td>{{ row.chainName }}</td>
+          <td>#{{ row.index }}</td>
+          <td>{{ row.nodeName }}</td>
+          <td>{{ row.serviceName }}</td>
+          <td><span :class="['badge', row.actualRunning ? 'online' : 'offline']">{{ row.actualRunning ? 'running' : 'not-running' }}</span></td>
+        </tr>
+      </tbody>
+    </table>
   </section>
 </template>
 
 <script setup>
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { api } from '../api/client'
 
 const chains = ref([])
+const runtime = ref({ chainStates: [] })
 const form = ref({ name: '', path: '', protocol: 'tcp' })
 const editingId = ref(null)
 const editForm = ref({ name: '', path: '', protocol: 'tcp' })
 
-const load = async () => { chains.value = await api.chains() }
+const chainState = (id) => (runtime.value.chainStates || []).find(item => item.id === id)
+const chainMismatch = (chain) => {
+  const state = chainState(chain.id)
+  if (!state) return false
+  return chain.enabled ? !state.allRunning : state.allRunning
+}
+const chainHopRows = computed(() => (runtime.value.chainStates || []).flatMap(chain =>
+  (chain.hops || []).map(hop => ({
+    key: `${chain.id}-${hop.index}`,
+    chainName: chain.name,
+    index: hop.index,
+    nodeName: hop.nodeName,
+    serviceName: hop.serviceName,
+    actualRunning: hop.actualRunning,
+  }))
+))
+const load = async () => {
+  const [chainRows, details] = await Promise.all([api.chains(), api.runtimeDetails()])
+  chains.value = chainRows
+  runtime.value = details
+}
 const createChain = async () => {
   await api.addChain(form.value)
   form.value = { name: '', path: '', protocol: 'tcp' }
