@@ -7,9 +7,27 @@
       </div>
       <form class="inline-form" @submit.prevent="createChain">
         <input v-model="form.name" placeholder="链路名称" required />
-        <input v-model="form.path" placeholder="如 B -> C -> D" required />
+        <input v-model="form.path" placeholder="如 B -> C -> D（兼容旧格式）" />
         <select v-model="form.protocol"><option value="tcp">tcp</option><option value="udp">udp</option><option value="socks5">socks5</option><option value="http">http</option></select>
         <button type="submit">创建</button>
+      </form>
+    </div>
+
+    <div class="toolbar" style="margin-top:12px">
+      <h2>最小双节点链路</h2>
+      <form class="inline-form" @submit.prevent="createTwoNodeChain">
+        <input v-model="twoNodeForm.name" placeholder="链路名称" required />
+        <select v-model.number="twoNodeForm.forwardNodeId">
+          <option v-for="n in nodes" :key="`f-${n.id}`" :value="n.id">Forward: {{ n.name }} ({{ n.status }})</option>
+        </select>
+        <input v-model="twoNodeForm.listenAddr" placeholder=":19021" required />
+        <input v-model="twoNodeForm.targetAddr" placeholder="8.8.8.8:53" required />
+        <select v-model.number="twoNodeForm.tunnelNodeId">
+          <option v-for="n in nodes" :key="`t-${n.id}`" :value="n.id">Tunnel: {{ n.name }} ({{ n.status }})</option>
+        </select>
+        <select v-model="twoNodeForm.tunnelMode"><option value="socks5">socks5</option><option value="http">http</option></select>
+        <input v-model="twoNodeForm.tunnelListen" placeholder=":11081" required />
+        <button type="submit">创建双节点链路</button>
       </form>
     </div>
 
@@ -66,8 +84,10 @@ import { computed, onMounted, ref } from 'vue'
 import { api } from '../api/client'
 
 const chains = ref([])
+const nodes = ref([])
 const runtime = ref({ chainStates: [] })
 const form = ref({ name: '', path: '', protocol: 'tcp' })
+const twoNodeForm = ref({ name: '', forwardNodeId: 0, listenAddr: ':19021', targetAddr: '8.8.8.8:53', tunnelNodeId: 0, tunnelMode: 'socks5', tunnelListen: ':11081' })
 const editingId = ref(null)
 const editForm = ref({ name: '', path: '', protocol: 'tcp' })
 
@@ -94,13 +114,39 @@ const chainHopRows = computed(() => (runtime.value.chainStates || []).flatMap(ch
   }))
 ))
 const load = async () => {
-  const [chainRows, details] = await Promise.all([api.chains(), api.runtimeDetails()])
+  const [chainRows, details, nodeRows] = await Promise.all([api.chains(), api.runtimeDetails(), api.nodes()])
   chains.value = chainRows
   runtime.value = details
+  nodes.value = nodeRows
+  if (!twoNodeForm.value.forwardNodeId && nodes.value.length) twoNodeForm.value.forwardNodeId = nodes.value[0].id
+  if (!twoNodeForm.value.tunnelNodeId && nodes.value.length) twoNodeForm.value.tunnelNodeId = nodes.value[Math.min(1, nodes.value.length - 1)].id
 }
 const createChain = async () => {
   await api.addChain(form.value)
   form.value = { name: '', path: '', protocol: 'tcp' }
+  await load()
+}
+const createTwoNodeChain = async () => {
+  await api.addChain({
+    name: twoNodeForm.value.name,
+    protocol: form.value.protocol,
+    hops: [
+      {
+        nodeId: twoNodeForm.value.forwardNodeId,
+        type: 'forward',
+        listenAddr: twoNodeForm.value.listenAddr,
+        targetAddr: twoNodeForm.value.targetAddr,
+        protocol: form.value.protocol,
+      },
+      {
+        nodeId: twoNodeForm.value.tunnelNodeId,
+        type: 'tunnel',
+        listenAddr: twoNodeForm.value.tunnelListen,
+        protocol: twoNodeForm.value.tunnelMode,
+      },
+    ],
+  })
+  twoNodeForm.value = { ...twoNodeForm.value, name: '', listenAddr: ':19021', targetAddr: '8.8.8.8:53', tunnelMode: 'socks5', tunnelListen: ':11081' }
   await load()
 }
 const startEdit = (c) => {
