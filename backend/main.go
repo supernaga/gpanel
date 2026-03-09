@@ -698,15 +698,53 @@ ORDER BY priority DESC, id LIMIT 1 FOR UPDATE SKIP LOCKED`
 		hops := []string{}
 		for _, part := range strings.Split(path, "->") {
 			p := strings.TrimSpace(part)
-			if p != "" { hops = append(hops, p) }
+			if p != "" {
+				hops = append(hops, p)
+			}
 		}
-		if len(hops) < 2 { return fmt.Errorf("chain path must contain at least 2 nodes") }
-		for i := 0; i < len(hops)-1; i++ {
+		if len(hops) == 0 {
+			return fmt.Errorf("chain path is empty")
+		}
+		for i, hop := range hops {
+			parts := strings.Split(hop, ":")
+			if len(parts) < 2 {
+				return fmt.Errorf("invalid chain hop: %s", hop)
+			}
+			nodeName := strings.TrimSpace(parts[0])
+			hopType := strings.TrimSpace(parts[1])
 			stepName := fmt.Sprintf("%s-hop-%d", chainName, i+1)
-			listen := fmt.Sprintf(":%d", 13000+i)
-			target := fmt.Sprintf("%s:%d", hops[i+1], 13000+i)
-			if err := scheduleForward(hops[i], stepName, protocol, listen, target); err != nil {
-				return err
+			switch hopType {
+			case "forward":
+				if len(parts) < 3 {
+					return fmt.Errorf("invalid forward hop: %s", hop)
+				}
+				mapping := strings.SplitN(parts[2], "=>", 2)
+				if len(mapping) != 2 {
+					return fmt.Errorf("invalid forward mapping: %s", hop)
+				}
+				listen := strings.TrimSpace(mapping[0])
+				target := strings.TrimSpace(mapping[1])
+				stepProtocol := protocol
+				if len(parts) >= 4 && strings.TrimSpace(parts[3]) != "" {
+					stepProtocol = strings.TrimSpace(parts[3])
+				}
+				if err := scheduleForward(nodeName, stepName, stepProtocol, listen, target); err != nil {
+					return err
+				}
+			case "tunnel":
+				mode := firstNonEmpty(strings.TrimSpace(protocol), "socks5")
+				listen := ":1080"
+				if len(parts) >= 3 && strings.TrimSpace(parts[2]) != "" {
+					mode = strings.TrimSpace(parts[2])
+				}
+				if len(parts) >= 4 && strings.TrimSpace(parts[3]) != "" {
+					listen = strings.TrimSpace(parts[3])
+				}
+				if err := scheduleTunnel(nodeName, stepName, mode, listen); err != nil {
+					return err
+				}
+			default:
+				return fmt.Errorf("unsupported chain hop type: %s", hopType)
 			}
 		}
 		return nil
@@ -904,7 +942,12 @@ ORDER BY priority DESC, id LIMIT 1 FOR UPDATE SKIP LOCKED`
 							writeJSON(w, 400, map[string]string{"error": "invalid payload"})
 							return
 						}
-						segments = append(segments, fmt.Sprintf("%d:forward:%s->%s", hop.NodeID, hop.ListenAddr, hop.TargetAddr))
+						nodeName, err := mustNodeName(hop.NodeID)
+						if err != nil {
+							writeJSON(w, 400, map[string]string{"error": "invalid payload"})
+							return
+						}
+						segments = append(segments, fmt.Sprintf("%s:forward:%s=>%s:%s", nodeName, hop.ListenAddr, hop.TargetAddr, firstNonEmpty(strings.TrimSpace(hop.Protocol), strings.TrimSpace(req.Protocol))))
 					} else if hop.Type == "tunnel" {
 						listen := strings.TrimSpace(hop.ListenAddr)
 						if listen == "" {
@@ -914,7 +957,12 @@ ORDER BY priority DESC, id LIMIT 1 FOR UPDATE SKIP LOCKED`
 						if mode == "" {
 							mode = "socks5"
 						}
-						segments = append(segments, fmt.Sprintf("%d:tunnel:%s:%s", hop.NodeID, mode, listen))
+						nodeName, err := mustNodeName(hop.NodeID)
+						if err != nil {
+							writeJSON(w, 400, map[string]string{"error": "invalid payload"})
+							return
+						}
+						segments = append(segments, fmt.Sprintf("%s:tunnel:%s:%s", nodeName, mode, listen))
 					} else {
 						writeJSON(w, 400, map[string]string{"error": "invalid payload"})
 						return
