@@ -47,6 +47,7 @@ TASK_MAX_RETRIES="${TASK_MAX_RETRIES:-3}"
 TASK_DISPATCH_PER_NODE="${TASK_DISPATCH_PER_NODE:-1}"
 ALERT_SILENT_HOURS="${ALERT_SILENT_HOURS:-}"
 IMAGE_PREFIX="${IMAGE_PREFIX:-ghcr.io/supernaga/gpanel}"
+PANEL_BUILD_MODE="${PANEL_BUILD_MODE:-auto}"
 
 write_env() {
 cat > deploy/.env <<EOT
@@ -72,22 +73,29 @@ cd deploy
 echo "[INFO] Deploying GPanel control plane..."
 echo "[INFO] Current UI focuses on Nodes / Forwards / Tunnels / Chains / Runtime"
 
-set +e
-docker compose up -d --pull always
-rc=$?
-set -e
-
-if [ $rc -ne 0 ]; then
-  echo "[WARN] Pull-based deploy failed, fallback to local image build..."
+deploy_local_build() {
+  echo "[INFO] Using local source build for panel images..."
   cd "$APP_DIR"
   IMAGE_PREFIX="local/gpanel"
   docker image inspect postgres:16 >/dev/null 2>&1 || docker pull postgres:16
-  docker build -t ${IMAGE_PREFIX}-server:latest ./backend
-  docker build -t ${IMAGE_PREFIX}-web:latest ./frontend
-  docker build -t ${IMAGE_PREFIX}-agent:latest ./agent || true
   write_env
   cd deploy
-  docker compose up -d --pull never
+  docker compose build backend frontend
+  docker compose up -d --force-recreate --pull never
+}
+
+if [ "$PANEL_BUILD_MODE" = "local" ]; then
+  deploy_local_build
+else
+  set +e
+  docker compose up -d --pull always
+  rc=$?
+  set -e
+
+  if [ $rc -ne 0 ]; then
+    echo "[WARN] Pull-based deploy failed, fallback to local image build..."
+    deploy_local_build
+  fi
 fi
 
 IP="$(hostname -I | awk '{print $1}')"

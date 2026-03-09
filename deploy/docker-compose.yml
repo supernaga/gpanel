@@ -18,6 +18,9 @@ services:
 
   backend:
     image: ${IMAGE_PREFIX}-server:latest
+    build:
+      context: ../backend
+      dockerfile: Dockerfile
     environment:
       PORT: 8080
       DB_DSN: postgres://gpanel:${POSTGRES_PASSWORD}@postgres:5432/gpanel?sslmode=disable
@@ -44,6 +47,9 @@ services:
 
   frontend:
     image: ${IMAGE_PREFIX}-web:latest
+    build:
+      context: ../frontend
+      dockerfile: Dockerfile
     ports:
       - "80:80"
     depends_on:
