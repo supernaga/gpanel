@@ -160,6 +160,14 @@ type Chain struct {
 	CreatedAt   time.Time `json:"createdAt"`
 }
 
+type ChainHop struct {
+	NodeID     int64  `json:"nodeId"`
+	Type       string `json:"type"`
+	ListenAddr string `json:"listenAddr"`
+	TargetAddr string `json:"targetAddr"`
+	Protocol   string `json:"protocol"`
+}
+
 var upgrader = websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
 
 func writeJSON(w http.ResponseWriter, code int, v any) {
@@ -868,8 +876,57 @@ ORDER BY priority DESC, id LIMIT 1 FOR UPDATE SKIP LOCKED`
 			}
 			writeJSON(w, 200, out)
 		case http.MethodPost:
-			var req struct { Name, Path, Protocol string }
-			if json.NewDecoder(r.Body).Decode(&req) != nil || req.Name == "" || req.Path == "" || req.Protocol == "" { writeJSON(w, 400, map[string]string{"error": "invalid payload"}); return }
+			var req struct {
+				Name      string     `json:"name"`
+				Path      string     `json:"path"`
+				Protocol  string     `json:"protocol"`
+				Hops      []ChainHop `json:"hops"`
+				Status    string     `json:"status"`
+				EntryNode int64      `json:"entryNodeId"`
+			}
+			if json.NewDecoder(r.Body).Decode(&req) != nil || strings.TrimSpace(req.Name) == "" {
+				writeJSON(w, 400, map[string]string{"error": "invalid payload"})
+				return
+			}
+			if strings.TrimSpace(req.Path) == "" && len(req.Hops) > 0 {
+				segments := []string{}
+				proto := strings.TrimSpace(req.Protocol)
+				for _, hop := range req.Hops {
+					if hop.NodeID <= 0 || strings.TrimSpace(hop.Type) == "" {
+						writeJSON(w, 400, map[string]string{"error": "invalid payload"})
+						return
+					}
+					if proto == "" && strings.TrimSpace(hop.Protocol) != "" {
+						proto = strings.TrimSpace(hop.Protocol)
+					}
+					if hop.Type == "forward" {
+						if strings.TrimSpace(hop.ListenAddr) == "" || strings.TrimSpace(hop.TargetAddr) == "" {
+							writeJSON(w, 400, map[string]string{"error": "invalid payload"})
+							return
+						}
+						segments = append(segments, fmt.Sprintf("%d:forward:%s->%s", hop.NodeID, hop.ListenAddr, hop.TargetAddr))
+					} else if hop.Type == "tunnel" {
+						listen := strings.TrimSpace(hop.ListenAddr)
+						if listen == "" {
+							listen = ":1080"
+						}
+						mode := strings.TrimSpace(hop.Protocol)
+						if mode == "" {
+							mode = "socks5"
+						}
+						segments = append(segments, fmt.Sprintf("%d:tunnel:%s:%s", hop.NodeID, mode, listen))
+					} else {
+						writeJSON(w, 400, map[string]string{"error": "invalid payload"})
+						return
+					}
+				}
+				req.Path = strings.Join(segments, ",")
+				req.Protocol = firstNonEmpty(strings.TrimSpace(req.Protocol), proto)
+			}
+			if strings.TrimSpace(req.Path) == "" || strings.TrimSpace(req.Protocol) == "" {
+				writeJSON(w, 400, map[string]string{"error": "invalid payload"})
+				return
+			}
 			description := "pending orchestration"
 			enabled := false
 			if err := orchestrateChain(req.Name, req.Path, req.Protocol); err == nil {
@@ -879,7 +936,7 @@ ORDER BY priority DESC, id LIMIT 1 FOR UPDATE SKIP LOCKED`
 			_, err := app.db.Exec(`INSERT INTO chains(name,path,protocol,enabled,description) VALUES($1,$2,$3,$4,$5)`, req.Name, req.Path, req.Protocol, enabled, description)
 			if err != nil { writeJSON(w, 500, map[string]string{"error": err.Error()}); return }
 			app.audit(r.Context(), "chain.create", fmt.Sprintf("chain/%s", req.Name), description)
-			writeJSON(w, 201, map[string]any{"ok": true, "enabled": enabled, "description": description})
+			writeJSON(w, 201, map[string]any{"ok": true, "enabled": enabled, "description": description, "path": req.Path, "protocol": req.Protocol})
 		default:
 			w.WriteHeader(http.StatusMethodNotAllowed)
 		}
