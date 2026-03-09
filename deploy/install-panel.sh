@@ -91,11 +91,11 @@ if [ $rc -ne 0 ]; then
 fi
 
 IP="$(hostname -I | awk '{print $1}')"
-echo "[INFO] Waiting for backend healthz..."
-if wait_http "http://127.0.0.1:8080/healthz"; then
-  echo "[OK] backend healthz is ready"
+echo "[INFO] Waiting for panel/frontend reachability..."
+if wait_http "http://127.0.0.1/"; then
+  echo "[OK] panel frontend is reachable"
 else
-  echo "[WARN] backend healthz check timed out"
+  echo "[WARN] panel frontend probe timed out"
 fi
 
 echo "[INFO] docker compose ps"
