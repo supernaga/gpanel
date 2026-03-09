@@ -22,6 +22,13 @@
       <div class="card"><p>失败任务</p><strong class="danger">{{ details.taskStats.failed || 0 }}</strong></div>
     </div>
 
+    <div class="cards" style="margin-top:16px">
+      <div class="card"><p>转发异常</p><strong :class="forwardMismatchCount ? 'danger' : ''">{{ forwardMismatchCount }}</strong></div>
+      <div class="card"><p>隧道异常</p><strong :class="tunnelMismatchCount ? 'danger' : ''">{{ tunnelMismatchCount }}</strong></div>
+      <div class="card"><p>链路异常</p><strong :class="chainMismatchCount ? 'danger' : ''">{{ chainMismatchCount }}</strong></div>
+      <div class="card"><p>总异常</p><strong :class="totalMismatchCount ? 'danger' : ''">{{ totalMismatchCount }}</strong></div>
+    </div>
+
     <div class="toolbar" style="margin-top:20px"><h2>节点状态</h2></div>
     <table>
       <thead><tr><th>节点</th><th>地域</th><th>状态</th><th>延迟</th><th>版本</th><th>更新时间</th></tr></thead>
@@ -170,6 +177,10 @@ const chainHopRows = computed(() => (details.value.chainStates || []).flatMap(ch
     actualRunning: hop.actualRunning,
   }))
 ))
+const forwardMismatchCount = computed(() => (details.value.forwards || []).filter(forwardMismatch).length)
+const tunnelMismatchCount = computed(() => (details.value.tunnels || []).filter(tunnelMismatch).length)
+const chainMismatchCount = computed(() => (details.value.chains || []).filter(chainMismatch).length)
+const totalMismatchCount = computed(() => forwardMismatchCount.value + tunnelMismatchCount.value + chainMismatchCount.value)
 const load = async () => {
   const [s, d] = await Promise.all([api.runtimeSummary(), api.runtimeDetails()])
   summary.value = s
