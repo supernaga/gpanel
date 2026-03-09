@@ -160,9 +160,44 @@ func installGost() (string, error) {
 func writeServiceAndStart(name, execLine string) (string, error) {
 	unit := fmt.Sprintf("[Unit]\nDescription=GOST %s\nAfter=network.target\n\n[Service]\nType=simple\nExecStart=%s\nRestart=always\nRestartSec=2\n\n[Install]\nWantedBy=multi-user.target\n", name, execLine)
 	path := filepath.Join("/etc/systemd/system", "gost-"+name+".service")
-	if err := os.WriteFile(path, []byte(unit), 0644); err != nil { return "", err }
+	if err := os.WriteFile(path, []byte(unit), 0644); err != nil {
+		return "", err
+	}
 	cmd := fmt.Sprintf("systemctl daemon-reload && systemctl enable --now gost-%s.service", name)
-	return run(cmd), cmdErr(cmd)
+	out := run(cmd)
+	if err := cmdErr(cmd); err != nil {
+		return out, err
+	}
+	return verifyServiceRunning(name)
+}
+
+func verifyServiceRunning(name string) (string, error) {
+	service := fmt.Sprintf("gost-%s.service", name)
+	deadline := time.Now().Add(12 * time.Second)
+	for time.Now().Before(deadline) {
+		state := strings.TrimSpace(run(fmt.Sprintf("systemctl is-active %s 2>/dev/null || true", service)))
+		if state == "active" {
+			statusOut := strings.TrimSpace(run(fmt.Sprintf("systemctl status %s --no-pager", service)))
+			if statusOut == "" {
+				statusOut = service + " active"
+			}
+			return statusOut, nil
+		}
+		time.Sleep(1500 * time.Millisecond)
+	}
+	statusOut := strings.TrimSpace(run(fmt.Sprintf("systemctl status %s --no-pager || true", service)))
+	journalOut := strings.TrimSpace(run(fmt.Sprintf("journalctl -u %s -n 40 --no-pager || true", service)))
+	combined := strings.TrimSpace(statusOut)
+	if journalOut != "" {
+		if combined != "" {
+			combined += "\n--- journalctl ---\n"
+		}
+		combined += journalOut
+	}
+	if combined == "" {
+		combined = service + " failed to reach active state"
+	}
+	return combined, fmt.Errorf("%s failed to reach active state", service)
 }
 
 func serviceAction(name, action string) (string, error) {
