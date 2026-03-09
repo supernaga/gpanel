@@ -985,7 +985,7 @@ ORDER BY priority DESC, id LIMIT 1 FOR UPDATE SKIP LOCKED`
 							writeJSON(w, 400, map[string]string{"error": "invalid payload", "detail": fmt.Sprintf("tunnel hop %d node %d not found", idx, hop.NodeID)})
 							return
 						}
-						segments = append(segments, fmt.Sprintf("%s:tunnel:%s:%s", nodeName, mode, listen))
+						segments = append(segments, fmt.Sprintf("%s:tunnel:%s%s", nodeName, mode, listen))
 					} else {
 						writeJSON(w, 400, map[string]string{"error": "invalid payload", "detail": fmt.Sprintf("unsupported hop type %q at index %d", hop.Type, idx)})
 						return
