@@ -37,6 +37,21 @@
       </tbody>
     </table>
 
+    <div class="toolbar" style="margin-top:20px"><h2>Agent 快照</h2></div>
+    <table>
+      <thead><tr><th>节点</th><th>IP</th><th>版本</th><th>能力</th><th>服务</th><th>心跳时间</th></tr></thead>
+      <tbody>
+        <tr v-for="hb in details.heartbeats" :key="hb.nodeUid">
+          <td>{{ hb.nodeName }}</td>
+          <td>{{ hb.nodeIp }}</td>
+          <td>{{ hb.version }}</td>
+          <td>{{ parseList(hb.capabilities).join(', ') || '-' }}</td>
+          <td>{{ parseList(hb.services).join(', ') || '-' }}</td>
+          <td>{{ formatTime(hb.createdAt) }}</td>
+        </tr>
+      </tbody>
+    </table>
+
     <div class="toolbar" style="margin-top:20px"><h2>转发状态</h2></div>
     <table>
       <thead><tr><th>名称</th><th>监听</th><th>目标</th><th>协议</th><th>节点</th><th>期望状态</th></tr></thead>
@@ -103,8 +118,11 @@ import { onMounted, ref } from 'vue'
 import { api } from '../api/client'
 
 const summary = ref({ nodes: 0, forwards: 0, tunnels: 0, chains: 0 })
-const details = ref({ nodes: [], forwards: [], tunnels: [], chains: [], tasks: [], taskStats: { pending: 0, running: 0, done: 0, failed: 0 } })
+const details = ref({ nodes: [], heartbeats: [], forwards: [], tunnels: [], chains: [], tasks: [], taskStats: { pending: 0, running: 0, done: 0, failed: 0 } })
 const formatTime = (value) => value ? new Date(value).toLocaleString() : '-'
+const parseList = (value) => {
+  try { return JSON.parse(value || '[]') } catch { return [] }
+}
 const load = async () => {
   const [s, d] = await Promise.all([api.runtimeSummary(), api.runtimeDetails()])
   summary.value = s

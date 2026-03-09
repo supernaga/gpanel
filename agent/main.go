@@ -74,6 +74,8 @@ func (a *Agent) heartbeat() {
 		"version": a.version,
 		"latencyMs": 20,
 		"region": "Unknown",
+		"capabilities": []string{"gost.install", "gost.apply_forward", "gost.apply_tunnel", "gost.start", "gost.stop", "gost.restart", "gost.status"},
+		"services": listGostServices(),
 	}
 	_, _ = a.client.R().SetHeader("Authorization", "Bearer "+a.token).SetBody(payload).Post(a.panelURL + "/api/agent/heartbeat")
 }
@@ -167,6 +169,21 @@ func serviceAction(name, action string) (string, error) {
 	cmd := fmt.Sprintf("systemctl %s gost-%s.service", action, name)
 	if action == "status" { cmd = fmt.Sprintf("systemctl status gost-%s.service --no-pager", name) }
 	return run(cmd), cmdErr(cmd)
+}
+
+func listGostServices() []string {
+	out := strings.TrimSpace(run("systemctl list-units --type=service --all 'gost-*.service' --no-legend | awk '{print $1}'"))
+	if out == "" {
+		return []string{}
+	}
+	items := []string{}
+	for _, line := range strings.Split(out, "\n") {
+		line = strings.TrimSpace(line)
+		if line != "" {
+			items = append(items, line)
+		}
+	}
+	return items
 }
 
 func run(cmd string) string {

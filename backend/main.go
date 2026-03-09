@@ -252,6 +252,8 @@ CREATE TABLE IF NOT EXISTS agent_heartbeats (
   node_ip TEXT,
   version TEXT,
   latency_ms INT NOT NULL DEFAULT 0,
+  capabilities TEXT NOT NULL DEFAULT '[]',
+  services TEXT NOT NULL DEFAULT '[]',
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   UNIQUE(node_uid)
 );
@@ -556,21 +558,25 @@ func main() {
 			return
 		}
 		var req struct {
-			NodeUID   string `json:"nodeUid"`
-			NodeName  string `json:"nodeName"`
-			NodeIP    string `json:"nodeIp"`
-			Version   string `json:"version"`
-			LatencyMs int    `json:"latencyMs"`
-			Region    string `json:"region"`
+			NodeUID      string   `json:"nodeUid"`
+			NodeName     string   `json:"nodeName"`
+			NodeIP       string   `json:"nodeIp"`
+			Version      string   `json:"version"`
+			LatencyMs    int      `json:"latencyMs"`
+			Region       string   `json:"region"`
+			Capabilities []string `json:"capabilities"`
+			Services     []string `json:"services"`
 		}
 		if json.NewDecoder(r.Body).Decode(&req) != nil || req.NodeUID == "" || req.NodeName == "" {
 			writeJSON(w, 400, map[string]string{"error": "invalid payload"})
 			return
 		}
-		_, _ = app.db.Exec(`INSERT INTO agent_heartbeats(node_name,node_uid,node_ip,version,latency_ms,created_at)
-VALUES($1,$2,$3,$4,$5,now())
+		capsJSON, _ := json.Marshal(req.Capabilities)
+		servicesJSON, _ := json.Marshal(req.Services)
+		_, _ = app.db.Exec(`INSERT INTO agent_heartbeats(node_name,node_uid,node_ip,version,latency_ms,capabilities,services,created_at)
+VALUES($1,$2,$3,$4,$5,$6,$7,now())
 ON CONFLICT (node_uid)
-DO UPDATE SET node_name=EXCLUDED.node_name,node_ip=EXCLUDED.node_ip,version=EXCLUDED.version,latency_ms=EXCLUDED.latency_ms,created_at=now()`, req.NodeName, req.NodeUID, req.NodeIP, req.Version, req.LatencyMs)
+DO UPDATE SET node_name=EXCLUDED.node_name,node_ip=EXCLUDED.node_ip,version=EXCLUDED.version,latency_ms=EXCLUDED.latency_ms,capabilities=EXCLUDED.capabilities,services=EXCLUDED.services,created_at=now()`, req.NodeName, req.NodeUID, req.NodeIP, req.Version, req.LatencyMs, string(capsJSON), string(servicesJSON))
 		_, _ = app.db.Exec(`INSERT INTO nodes(name,region,status,latency_ms,version,updated_at)
 VALUES($1,$2,'online',$3,$4,now())
 ON CONFLICT (name) DO UPDATE SET status='online',latency_ms=EXCLUDED.latency_ms,version=EXCLUDED.version,updated_at=now()`, req.NodeName, first(req.Region, "Unknown"), req.LatencyMs, first(req.Version, "gost v3"))
@@ -726,6 +732,17 @@ ORDER BY priority DESC, id LIMIT 1 FOR UPDATE SKIP LOCKED`
 			nodes = append(nodes, n)
 		}
 
+		heartbeatRows, _ := app.db.Query(`SELECT node_uid,node_name,node_ip,version,latency_ms,capabilities,services,created_at FROM agent_heartbeats ORDER BY created_at DESC LIMIT 20`)
+		defer heartbeatRows.Close()
+		heartbeats := []map[string]any{}
+		for heartbeatRows.Next() {
+			var nodeUID, nodeName, nodeIP, version, caps, services string
+			var latency int
+			var created time.Time
+			_ = heartbeatRows.Scan(&nodeUID, &nodeName, &nodeIP, &version, &latency, &caps, &services, &created)
+			heartbeats = append(heartbeats, map[string]any{"nodeUid": nodeUID, "nodeName": nodeName, "nodeIp": nodeIP, "version": version, "latencyMs": latency, "capabilities": caps, "services": services, "createdAt": created})
+		}
+
 		forwardRows, _ := app.db.Query(`SELECT id,name,listen_addr,target_addr,protocol,status,node_id,connections,updated_at FROM forwards ORDER BY id DESC LIMIT 20`)
 		defer forwardRows.Close()
 		forwards := []ForwardRule{}
@@ -764,7 +781,7 @@ ORDER BY priority DESC, id LIMIT 1 FOR UPDATE SKIP LOCKED`
 
 		var pending, running, done, failed int
 		_ = app.db.QueryRow(`SELECT COUNT(*) FILTER (WHERE status='pending'), COUNT(*) FILTER (WHERE status='running'), COUNT(*) FILTER (WHERE status='done'), COUNT(*) FILTER (WHERE status='failed') FROM agent_tasks`).Scan(&pending, &running, &done, &failed)
-		writeJSON(w, 200, map[string]any{"nodes": nodes, "forwards": forwards, "tunnels": tunnels, "chains": chains, "tasks": tasks, "taskStats": map[string]int{"pending": pending, "running": running, "done": done, "failed": failed}})
+		writeJSON(w, 200, map[string]any{"nodes": nodes, "heartbeats": heartbeats, "forwards": forwards, "tunnels": tunnels, "chains": chains, "tasks": tasks, "taskStats": map[string]int{"pending": pending, "running": running, "done": done, "failed": failed}})
 	})
 
 	api.HandleFunc("/api/tunnels", func(w http.ResponseWriter, r *http.Request) {
