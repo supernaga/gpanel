@@ -715,46 +715,56 @@ ORDER BY priority DESC, id LIMIT 1 FOR UPDATE SKIP LOCKED`
 			return fmt.Errorf("chain path is empty")
 		}
 		for i, hop := range hops {
-			parts := strings.Split(hop, ":")
-			if len(parts) < 2 {
-				return fmt.Errorf("invalid chain hop: %s", hop)
-			}
-			nodeName := strings.TrimSpace(parts[0])
-			hopType := strings.TrimSpace(parts[1])
 			stepName := fmt.Sprintf("%s-hop-%d", chainName, i+1)
-			switch hopType {
-			case "forward":
-				if len(parts) < 3 {
+			if strings.Contains(hop, ":forward:") {
+				parts := strings.SplitN(hop, ":forward:", 2)
+				if len(parts) != 2 {
 					return fmt.Errorf("invalid forward hop: %s", hop)
 				}
-				mapping := strings.SplitN(parts[2], "=>", 2)
+				nodeName := strings.TrimSpace(parts[0])
+				rest := strings.TrimSpace(parts[1])
+				mappingAndProtocol := strings.Split(rest, ":")
+				if len(mappingAndProtocol) < 2 {
+					return fmt.Errorf("invalid forward mapping: %s", hop)
+				}
+				stepProtocol := strings.TrimSpace(mappingAndProtocol[len(mappingAndProtocol)-1])
+				mappingRaw := strings.Join(mappingAndProtocol[:len(mappingAndProtocol)-1], ":")
+				mapping := strings.SplitN(mappingRaw, "=>", 2)
 				if len(mapping) != 2 {
 					return fmt.Errorf("invalid forward mapping: %s", hop)
 				}
 				listen := strings.TrimSpace(mapping[0])
 				target := strings.TrimSpace(mapping[1])
-				stepProtocol := protocol
-				if len(parts) >= 4 && strings.TrimSpace(parts[3]) != "" {
-					stepProtocol = strings.TrimSpace(parts[3])
+				if stepProtocol == "" {
+					stepProtocol = protocol
 				}
 				if err := scheduleForward(nodeName, stepName, stepProtocol, listen, target); err != nil {
 					return err
 				}
-			case "tunnel":
+				continue
+			}
+			if strings.Contains(hop, ":tunnel:") {
+				parts := strings.SplitN(hop, ":tunnel:", 2)
+				if len(parts) != 2 {
+					return fmt.Errorf("invalid tunnel hop: %s", hop)
+				}
+				nodeName := strings.TrimSpace(parts[0])
+				rest := strings.TrimSpace(parts[1])
 				mode := firstNonEmpty(strings.TrimSpace(protocol), "socks5")
 				listen := ":1080"
-				if len(parts) >= 3 && strings.TrimSpace(parts[2]) != "" {
-					mode = strings.TrimSpace(parts[2])
+				restParts := strings.Split(rest, ":")
+				if len(restParts) >= 1 && strings.TrimSpace(restParts[0]) != "" {
+					mode = strings.TrimSpace(restParts[0])
 				}
-				if len(parts) >= 4 && strings.TrimSpace(parts[3]) != "" {
-					listen = strings.TrimSpace(parts[3])
+				if len(restParts) >= 2 {
+					listen = ":" + strings.Join(restParts[1:], ":")
 				}
 				if err := scheduleTunnel(nodeName, stepName, mode, listen); err != nil {
 					return err
 				}
-			default:
-				return fmt.Errorf("unsupported chain hop type: %s", hopType)
+				continue
 			}
+			return fmt.Errorf("unsupported chain hop type: %s", hop)
 		}
 		return nil
 	}
