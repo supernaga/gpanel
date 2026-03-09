@@ -61,6 +61,9 @@ EOT
 write_env
 cd deploy
 
+echo "[INFO] Deploying GPanel control plane..."
+echo "[INFO] Current UI focuses on Nodes / Forwards / Tunnels / Chains / Runtime"
+
 set +e
 docker compose up -d --pull always
 rc=$?
@@ -86,3 +89,4 @@ echo "[INFO] Secrets saved in: $APP_DIR/deploy/.env"
 echo "[INFO] Agent token: $AGENT_TOKEN"
 echo "[INFO] Admin user: $ADMIN_USER"
 echo "[INFO] Admin password: $ADMIN_PASSWORD"
+echo "[INFO] Recommended validation path: Nodes -> Forwards -> Tunnels -> Chains -> Runtime"

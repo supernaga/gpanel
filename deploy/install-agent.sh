@@ -59,3 +59,4 @@ systemctl daemon-reload
 systemctl enable --now gpanel-agent.service
 systemctl status gpanel-agent.service --no-pager | sed -n '1,12p'
 echo "[OK] host agent installed"
+echo "[INFO] After node online, verify in UI: Nodes -> Forwards/Tunnels -> Chains -> Runtime"
