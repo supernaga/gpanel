@@ -993,6 +993,8 @@ ORDER BY priority DESC, id LIMIT 1 FOR UPDATE SKIP LOCKED`
 			if err := orchestrateChain(req.Name, req.Path, req.Protocol); err == nil {
 				description = "tasks scheduled"
 				enabled = true
+			} else {
+				description = err.Error()
 			}
 			_, err := app.db.Exec(`INSERT INTO chains(name,path,protocol,enabled,description) VALUES($1,$2,$3,$4,$5)`, req.Name, req.Path, req.Protocol, enabled, description)
 			if err != nil { writeJSON(w, 500, map[string]string{"error": err.Error()}); return }
@@ -1036,7 +1038,12 @@ ORDER BY priority DESC, id LIMIT 1 FOR UPDATE SKIP LOCKED`
 			enabled := !chain.Enabled
 			description := chain.Description
 			if enabled {
-				if err := orchestrateChain(chain.Name, chain.Path, chain.Protocol); err == nil { description = "tasks scheduled" } else { description = err.Error(); enabled = false }
+				if err := orchestrateChain(chain.Name, chain.Path, chain.Protocol); err == nil {
+					description = "tasks scheduled"
+				} else {
+					description = err.Error()
+					enabled = false
+				}
 			}
 			_, _ = app.db.Exec(`UPDATE chains SET enabled=$2, description=$3 WHERE id=$1`, id, enabled, description)
 			app.audit(r.Context(), "chain.toggle", fmt.Sprintf("chain/%d", id), fmt.Sprintf("enabled=%v", enabled))
