@@ -5,6 +5,14 @@ APP_DIR="${APP_DIR:-/opt/gpanel}"
 BRANCH="${BRANCH:-main}"
 
 rand() { tr -dc A-Za-z0-9 </dev/urandom | head -c 32; }
+wait_http() {
+  local url="$1"
+  for _ in $(seq 1 30); do
+    if curl -fsS "$url" >/dev/null 2>&1; then return 0; fi
+    sleep 2
+  done
+  return 1
+}
 
 command -v git >/dev/null 2>&1 || (apt-get update && apt-get install -y git curl)
 command -v docker >/dev/null 2>&1 || curl -fsSL https://get.docker.com | sh
@@ -83,6 +91,16 @@ if [ $rc -ne 0 ]; then
 fi
 
 IP="$(hostname -I | awk '{print $1}')"
+echo "[INFO] Waiting for backend healthz..."
+if wait_http "http://127.0.0.1:8080/healthz"; then
+  echo "[OK] backend healthz is ready"
+else
+  echo "[WARN] backend healthz check timed out"
+fi
+
+echo "[INFO] docker compose ps"
+docker compose ps || true
+
 echo ""
 echo "[OK] Panel started: http://$IP"
 echo "[INFO] Secrets saved in: $APP_DIR/deploy/.env"
