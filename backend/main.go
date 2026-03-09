@@ -800,12 +800,22 @@ ORDER BY priority DESC, id LIMIT 1 FOR UPDATE SKIP LOCKED`
 		heartbeatRows, _ := app.db.Query(`SELECT node_uid,node_name,node_ip,version,latency_ms,capabilities,services,created_at FROM agent_heartbeats ORDER BY created_at DESC LIMIT 20`)
 		defer heartbeatRows.Close()
 		heartbeats := []map[string]any{}
+		serviceStateByNode := map[string]map[string]bool{}
 		for heartbeatRows.Next() {
 			var nodeUID, nodeName, nodeIP, version, caps, services string
 			var latency int
 			var created time.Time
 			_ = heartbeatRows.Scan(&nodeUID, &nodeName, &nodeIP, &version, &latency, &caps, &services, &created)
 			heartbeats = append(heartbeats, map[string]any{"nodeUid": nodeUID, "nodeName": nodeName, "nodeIp": nodeIP, "version": version, "latencyMs": latency, "capabilities": caps, "services": services, "createdAt": created})
+			if _, ok := serviceStateByNode[nodeName]; !ok {
+				serviceStateByNode[nodeName] = map[string]bool{}
+			}
+			var serviceList []string
+			if err := json.Unmarshal([]byte(services), &serviceList); err == nil {
+				for _, svc := range serviceList {
+					serviceStateByNode[nodeName][strings.TrimSpace(svc)] = true
+				}
+			}
 		}
 
 		forwardRows, _ := app.db.Query(`SELECT id,name,listen_addr,target_addr,protocol,status,node_id,connections,updated_at FROM forwards ORDER BY id DESC LIMIT 20`)
@@ -815,6 +825,11 @@ ORDER BY priority DESC, id LIMIT 1 FOR UPDATE SKIP LOCKED`
 			var f ForwardRule
 			_ = forwardRows.Scan(&f.ID, &f.Name, &f.ListenAddr, &f.TargetAddr, &f.Protocol, &f.Status, &f.NodeID, &f.Connections, &f.UpdatedAt)
 			forwards = append(forwards, f)
+		}
+
+		nodeNameByID := map[int64]string{}
+		for _, n := range nodes {
+			nodeNameByID[n.ID] = n.Name
 		}
 
 		tunnelRows, _ := app.db.Query(`SELECT id,name,mode,listen,node_id,enabled,description,created_at FROM tunnels ORDER BY id DESC LIMIT 20`)
@@ -846,7 +861,72 @@ ORDER BY priority DESC, id LIMIT 1 FOR UPDATE SKIP LOCKED`
 
 		var pending, running, done, failed int
 		_ = app.db.QueryRow(`SELECT COUNT(*) FILTER (WHERE status='pending'), COUNT(*) FILTER (WHERE status='running'), COUNT(*) FILTER (WHERE status='done'), COUNT(*) FILTER (WHERE status='failed') FROM agent_tasks`).Scan(&pending, &running, &done, &failed)
-		writeJSON(w, 200, map[string]any{"nodes": nodes, "heartbeats": heartbeats, "forwards": forwards, "tunnels": tunnels, "chains": chains, "tasks": tasks, "taskStats": map[string]int{"pending": pending, "running": running, "done": done, "failed": failed}})
+		forwardStates := []map[string]any{}
+		for _, f := range forwards {
+			nodeName := nodeNameByID[f.NodeID]
+			serviceName := fmt.Sprintf("gost-%s.service", f.Name)
+			actualRunning := serviceStateByNode[nodeName][serviceName]
+			forwardStates = append(forwardStates, map[string]any{
+				"id": f.ID,
+				"name": f.Name,
+				"nodeId": f.NodeID,
+				"nodeName": nodeName,
+				"desiredStatus": f.Status,
+				"serviceName": serviceName,
+				"actualRunning": actualRunning,
+			})
+		}
+
+		tunnelStates := []map[string]any{}
+		for _, t := range tunnels {
+			nodeName := nodeNameByID[t.NodeID]
+			serviceName := fmt.Sprintf("gost-%s.service", t.Name)
+			actualRunning := serviceStateByNode[nodeName][serviceName]
+			tunnelStates = append(tunnelStates, map[string]any{
+				"id": t.ID,
+				"name": t.Name,
+				"nodeId": t.NodeID,
+				"nodeName": nodeName,
+				"desiredEnabled": t.Enabled,
+				"serviceName": serviceName,
+				"actualRunning": actualRunning,
+			})
+		}
+
+		chainStates := []map[string]any{}
+		for _, c := range chains {
+			hopStates := []map[string]any{}
+			allRunning := true
+			parts := strings.Split(c.Path, "->")
+			for i, rawHop := range parts {
+				hop := strings.TrimSpace(rawHop)
+				if hop == "" {
+					continue
+				}
+				nodeName := strings.TrimSpace(strings.SplitN(hop, ":", 2)[0])
+				serviceName := fmt.Sprintf("gost-%s-hop-%d.service", c.Name, i+1)
+				running := serviceStateByNode[nodeName][serviceName]
+				if !running {
+					allRunning = false
+				}
+				hopStates = append(hopStates, map[string]any{
+					"index": i + 1,
+					"nodeName": nodeName,
+					"serviceName": serviceName,
+					"actualRunning": running,
+				})
+			}
+			chainStates = append(chainStates, map[string]any{
+				"id": c.ID,
+				"name": c.Name,
+				"enabled": c.Enabled,
+				"description": c.Description,
+				"allRunning": allRunning,
+				"hops": hopStates,
+			})
+		}
+
+		writeJSON(w, 200, map[string]any{"nodes": nodes, "heartbeats": heartbeats, "forwards": forwards, "tunnels": tunnels, "chains": chains, "tasks": tasks, "taskStats": map[string]int{"pending": pending, "running": running, "done": done, "failed": failed}, "forwardStates": forwardStates, "tunnelStates": tunnelStates, "chainStates": chainStates})
 	})
 
 	api.HandleFunc("/api/tunnels", func(w http.ResponseWriter, r *http.Request) {
