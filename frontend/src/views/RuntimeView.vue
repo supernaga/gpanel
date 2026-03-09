@@ -54,29 +54,33 @@
 
     <div class="toolbar" style="margin-top:20px"><h2>转发状态</h2></div>
     <table>
-      <thead><tr><th>名称</th><th>监听</th><th>目标</th><th>协议</th><th>节点</th><th>期望状态</th></tr></thead>
+      <thead><tr><th>名称</th><th>监听</th><th>目标</th><th>协议</th><th>节点</th><th>期望状态</th><th>实际状态</th><th>服务</th></tr></thead>
       <tbody>
         <tr v-for="f in details.forwards" :key="f.id">
           <td>{{ f.name }}</td>
           <td>{{ f.listenAddr }}</td>
           <td>{{ f.targetAddr }}</td>
           <td>{{ f.protocol }}</td>
-          <td>#{{ f.nodeId }}</td>
+          <td>{{ findForwardState(f.id)?.nodeName || ('#' + f.nodeId) }}</td>
           <td><span :class="['badge', f.status === 'enabled' ? 'online' : 'offline']">{{ f.status }}</span></td>
+          <td><span :class="['badge', findForwardState(f.id)?.actualRunning ? 'online' : 'offline']">{{ findForwardState(f.id)?.actualRunning ? 'running' : 'not-running' }}</span></td>
+          <td>{{ findForwardState(f.id)?.serviceName || '-' }}</td>
         </tr>
       </tbody>
     </table>
 
     <div class="toolbar" style="margin-top:20px"><h2>隧道状态</h2></div>
     <table>
-      <thead><tr><th>名称</th><th>模式</th><th>监听</th><th>节点</th><th>期望状态</th><th>说明</th></tr></thead>
+      <thead><tr><th>名称</th><th>模式</th><th>监听</th><th>节点</th><th>期望状态</th><th>实际状态</th><th>服务</th><th>说明</th></tr></thead>
       <tbody>
         <tr v-for="t in details.tunnels" :key="t.id">
           <td>{{ t.name }}</td>
           <td>{{ t.mode }}</td>
           <td>{{ t.listen }}</td>
-          <td>#{{ t.nodeId }}</td>
+          <td>{{ findTunnelState(t.id)?.nodeName || ('#' + t.nodeId) }}</td>
           <td><span :class="['badge', t.enabled ? 'online' : 'offline']">{{ t.enabled ? 'enabled' : 'disabled' }}</span></td>
+          <td><span :class="['badge', findTunnelState(t.id)?.actualRunning ? 'online' : 'offline']">{{ findTunnelState(t.id)?.actualRunning ? 'running' : 'not-running' }}</span></td>
+          <td>{{ findTunnelState(t.id)?.serviceName || '-' }}</td>
           <td>{{ t.description }}</td>
         </tr>
       </tbody>
@@ -84,14 +88,29 @@
 
     <div class="toolbar" style="margin-top:20px"><h2>链路状态</h2></div>
     <table>
-      <thead><tr><th>名称</th><th>路径</th><th>协议</th><th>期望状态</th><th>说明</th></tr></thead>
+      <thead><tr><th>名称</th><th>路径</th><th>协议</th><th>期望状态</th><th>实际状态</th><th>说明</th></tr></thead>
       <tbody>
         <tr v-for="c in details.chains" :key="c.id">
           <td>{{ c.name }}</td>
           <td>{{ c.path }}</td>
           <td>{{ c.protocol }}</td>
           <td><span :class="['badge', c.enabled ? 'online' : 'offline']">{{ c.enabled ? 'enabled' : 'draft' }}</span></td>
+          <td><span :class="['badge', findChainState(c.id)?.allRunning ? 'online' : 'offline']">{{ findChainState(c.id)?.allRunning ? 'all-running' : 'partial' }}</span></td>
           <td>{{ c.description }}</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <div class="toolbar" style="margin-top:20px"><h2>链路 Hop 状态</h2></div>
+    <table>
+      <thead><tr><th>链路</th><th>Hop</th><th>节点</th><th>服务</th><th>实际状态</th></tr></thead>
+      <tbody>
+        <tr v-for="row in chainHopRows" :key="row.key">
+          <td>{{ row.chainName }}</td>
+          <td>#{{ row.index }}</td>
+          <td>{{ row.nodeName }}</td>
+          <td>{{ row.serviceName }}</td>
+          <td><span :class="['badge', row.actualRunning ? 'online' : 'offline']">{{ row.actualRunning ? 'running' : 'not-running' }}</span></td>
         </tr>
       </tbody>
     </table>
@@ -114,15 +133,28 @@
 </template>
 
 <script setup>
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { api } from '../api/client'
 
 const summary = ref({ nodes: 0, forwards: 0, tunnels: 0, chains: 0 })
-const details = ref({ nodes: [], heartbeats: [], forwards: [], tunnels: [], chains: [], tasks: [], taskStats: { pending: 0, running: 0, done: 0, failed: 0 } })
+const details = ref({ nodes: [], heartbeats: [], forwards: [], tunnels: [], chains: [], tasks: [], taskStats: { pending: 0, running: 0, done: 0, failed: 0 }, forwardStates: [], tunnelStates: [], chainStates: [] })
 const formatTime = (value) => value ? new Date(value).toLocaleString() : '-'
 const parseList = (value) => {
   try { return JSON.parse(value || '[]') } catch { return [] }
 }
+const findForwardState = (id) => (details.value.forwardStates || []).find(item => item.id === id)
+const findTunnelState = (id) => (details.value.tunnelStates || []).find(item => item.id === id)
+const findChainState = (id) => (details.value.chainStates || []).find(item => item.id === id)
+const chainHopRows = computed(() => (details.value.chainStates || []).flatMap(chain =>
+  (chain.hops || []).map(hop => ({
+    key: `${chain.id}-${hop.index}`,
+    chainName: chain.name,
+    index: hop.index,
+    nodeName: hop.nodeName,
+    serviceName: hop.serviceName,
+    actualRunning: hop.actualRunning,
+  }))
+))
 const load = async () => {
   const [s, d] = await Promise.all([api.runtimeSummary(), api.runtimeDetails()])
   summary.value = s
