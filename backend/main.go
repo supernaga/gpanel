@@ -1334,13 +1334,31 @@ ORDER BY priority DESC, id LIMIT 1 FOR UPDATE SKIP LOCKED`
 			}
 			writeJSON(w, 200, out)
 		case http.MethodPost:
-			var req struct{ Name, Region string }
+			var req struct {
+				Name    string `json:"name"`
+				Region  string `json:"region"`
+				Status  string `json:"status"`
+				Version string `json:"version"`
+			}
 			if json.NewDecoder(r.Body).Decode(&req) != nil || req.Name == "" || req.Region == "" {
 				writeJSON(w, 400, map[string]string{"error": "invalid payload"})
 				return
 			}
+			status := strings.TrimSpace(req.Status)
+			if status == "" {
+				status = "offline"
+			}
+			if status != "online" && status != "offline" {
+				writeJSON(w, 400, map[string]string{"error": "invalid payload"})
+				return
+			}
+			version := firstNonEmpty(req.Version, "pending-agent")
+			latency := 0
+			if status == "online" {
+				latency = rand.Intn(70) + 20
+			}
 			var n Node
-			err := app.db.QueryRow(`INSERT INTO nodes(name,region,status,latency_ms,version,updated_at) VALUES($1,$2,'online',$3,'gost v3.0.0',now()) RETURNING id,name,region,status,latency_ms,version,updated_at`, req.Name, req.Region, rand.Intn(70)+20).
+			err := app.db.QueryRow(`INSERT INTO nodes(name,region,status,latency_ms,version,updated_at) VALUES($1,$2,$3,$4,$5,now()) RETURNING id,name,region,status,latency_ms,version,updated_at`, req.Name, req.Region, status, latency, version).
 				Scan(&n.ID, &n.Name, &n.Region, &n.Status, &n.LatencyMs, &n.Version, &n.UpdatedAt)
 			if err != nil {
 				writeJSON(w, 500, map[string]string{"error": err.Error()})

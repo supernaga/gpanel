@@ -5,6 +5,8 @@
       <form @submit.prevent="createNode" class="inline-form">
         <input v-model="form.name" placeholder="节点名，如 hk-edge-02" required />
         <input v-model="form.region" placeholder="区域，如 Hong Kong" required />
+        <select v-model="form.status"><option value="offline">offline</option><option value="online">online</option></select>
+        <input v-model="form.version" placeholder="版本，如 pending-agent / v0.3.0" />
         <button type="submit">新增节点</button>
       </form>
     </div>
@@ -67,7 +69,7 @@ import { onMounted, ref } from 'vue'
 import { api } from '../api/client'
 
 const nodes = ref([])
-const form = ref({ name: '', region: '' })
+const form = ref({ name: '', region: '', status: 'offline', version: 'pending-agent' })
 const editingId = ref(null)
 const editForm = ref({ name: '', region: '', version: '' })
 const heartbeatNodeId = ref(null)
@@ -77,7 +79,7 @@ const load = async () => { nodes.value = await api.nodes() }
 
 const createNode = async () => {
   await api.addNode(form.value)
-  form.value = { name: '', region: '' }
+  form.value = { name: '', region: '', status: 'offline', version: 'pending-agent' }
   await load()
 }
 
