@@ -19,7 +19,7 @@
     <table>
       <thead><tr><th>名称</th><th>模式</th><th>监听</th><th>节点</th><th>期望状态</th><th>实际状态</th><th>服务</th><th>说明</th><th>操作</th></tr></thead>
       <tbody>
-        <tr v-for="t in tunnels" :key="t.id">
+        <tr v-for="t in sortedTunnels" :key="t.id">
           <td><template v-if="editingId===t.id"><input v-model="editForm.name" /></template><template v-else>{{ t.name }}</template></td>
           <td><template v-if="editingId===t.id"><select v-model="editForm.mode"><option value="socks5">socks5</option><option value="http">http</option></select></template><template v-else>{{ t.mode }}</template></td>
           <td><template v-if="editingId===t.id"><input v-model="editForm.listen" /></template><template v-else>{{ t.listen }}</template></td>
@@ -47,7 +47,7 @@
 </template>
 
 <script setup>
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { api } from '../api/client'
 
 const nodes = ref([])
@@ -63,6 +63,12 @@ const tunnelMismatch = (tunnel) => {
   if (!state) return false
   return tunnel.enabled ? !state.actualRunning : state.actualRunning
 }
+const sortedTunnels = computed(() => [...tunnels.value].sort((a, b) => {
+  const am = tunnelMismatch(a) ? 1 : 0
+  const bm = tunnelMismatch(b) ? 1 : 0
+  if (am !== bm) return bm - am
+  return b.id - a.id
+}))
 const nodeName = (id) => nodes.value.find((n) => n.id === id)?.name || `#${id}`
 const load = async () => {
   const [nodeRows, tunnelRows, details] = await Promise.all([api.nodes(), api.tunnels(), api.runtimeDetails()])

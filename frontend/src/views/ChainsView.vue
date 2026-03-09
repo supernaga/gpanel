@@ -16,7 +16,7 @@
     <table>
       <thead><tr><th>名称</th><th>路径</th><th>协议</th><th>期望状态</th><th>实际状态</th><th>说明</th><th>操作</th></tr></thead>
       <tbody>
-        <tr v-for="c in chains" :key="c.id">
+        <tr v-for="c in sortedChains" :key="c.id">
           <td>
             <template v-if="editingId === c.id"><input v-model="editForm.name" /></template>
             <template v-else>{{ c.name }}</template>
@@ -77,6 +77,12 @@ const chainMismatch = (chain) => {
   if (!state) return false
   return chain.enabled ? !state.allRunning : state.allRunning
 }
+const sortedChains = computed(() => [...chains.value].sort((a, b) => {
+  const am = chainMismatch(a) ? 1 : 0
+  const bm = chainMismatch(b) ? 1 : 0
+  if (am !== bm) return bm - am
+  return b.id - a.id
+}))
 const chainHopRows = computed(() => (runtime.value.chainStates || []).flatMap(chain =>
   (chain.hops || []).map(hop => ({
     key: `${chain.id}-${hop.index}`,

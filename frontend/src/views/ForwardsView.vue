@@ -14,7 +14,7 @@
     <table>
       <thead><tr><th>ID</th><th>名称</th><th>监听</th><th>目标</th><th>协议</th><th>节点</th><th>期望状态</th><th>实际状态</th><th>服务</th><th>连接数</th><th>操作</th></tr></thead>
       <tbody>
-        <tr v-for="r in rows" :key="r.id">
+        <tr v-for="r in sortedRows" :key="r.id">
           <td>{{ r.id }}</td>
           <td><template v-if="editingId===r.id"><input v-model="editForm.name" /></template><template v-else>{{ r.name }}</template></td>
           <td><template v-if="editingId===r.id"><input v-model="editForm.listenAddr" /></template><template v-else>{{ r.listenAddr }}</template></td>
@@ -39,7 +39,7 @@
 </template>
 
 <script setup>
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { api } from '../api/client'
 const rows = ref([])
 const runtime = ref({ forwardStates: [] })
@@ -52,6 +52,12 @@ const forwardMismatch = (row) => {
   if (!state) return false
   return row.status === 'enabled' ? !state.actualRunning : state.actualRunning
 }
+const sortedRows = computed(() => [...rows.value].sort((a, b) => {
+  const am = forwardMismatch(a) ? 1 : 0
+  const bm = forwardMismatch(b) ? 1 : 0
+  if (am !== bm) return bm - am
+  return b.id - a.id
+}))
 const load = async () => {
   const [forwards, details] = await Promise.all([api.forwards(), api.runtimeDetails()])
   rows.value = forwards
