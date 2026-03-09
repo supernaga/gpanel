@@ -18,17 +18,18 @@
       <form class="inline-form" @submit.prevent="createTwoNodeChain">
         <input v-model="twoNodeForm.name" placeholder="链路名称" required />
         <select v-model.number="twoNodeForm.forwardNodeId">
-          <option v-for="n in nodes" :key="`f-${n.id}`" :value="n.id">Forward: {{ n.name }} ({{ n.status }})</option>
+          <option v-for="n in selectableNodes" :key="`f-${n.id}`" :value="n.id">Forward: {{ n.name }} ({{ n.status }})</option>
         </select>
         <input v-model="twoNodeForm.listenAddr" placeholder=":19021" required />
         <input v-model="twoNodeForm.targetAddr" placeholder="8.8.8.8:53" required />
         <select v-model.number="twoNodeForm.tunnelNodeId">
-          <option v-for="n in nodes" :key="`t-${n.id}`" :value="n.id">Tunnel: {{ n.name }} ({{ n.status }})</option>
+          <option v-for="n in selectableNodes" :key="`t-${n.id}`" :value="n.id">Tunnel: {{ n.name }} ({{ n.status }})</option>
         </select>
         <select v-model="twoNodeForm.tunnelMode"><option value="socks5">socks5</option><option value="http">http</option></select>
         <input v-model="twoNodeForm.tunnelListen" placeholder=":11081" required />
         <button type="submit">创建双节点链路</button>
       </form>
+      <p class="hint">当前在线节点 {{ onlineNodeCount }} / {{ nodes.length }}。表单会优先排序在线节点；若只有一个在线节点，也允许先用 offline 草稿节点占位。</p>
     </div>
 
     <table>
@@ -92,6 +93,13 @@ const editingId = ref(null)
 const editForm = ref({ name: '', path: '', protocol: 'tcp' })
 
 const chainState = (id) => (runtime.value.chainStates || []).find(item => item.id === id)
+const selectableNodes = computed(() => [...nodes.value].sort((a, b) => {
+  const ao = a.status === 'online' ? 1 : 0
+  const bo = b.status === 'online' ? 1 : 0
+  if (ao !== bo) return bo - ao
+  return a.id - b.id
+}))
+const onlineNodeCount = computed(() => nodes.value.filter(n => n.status === 'online').length)
 const chainMismatch = (chain) => {
   const state = chainState(chain.id)
   if (!state) return false
@@ -118,8 +126,14 @@ const load = async () => {
   chains.value = chainRows
   runtime.value = details
   nodes.value = nodeRows
-  if (!twoNodeForm.value.forwardNodeId && nodes.value.length) twoNodeForm.value.forwardNodeId = nodes.value[0].id
-  if (!twoNodeForm.value.tunnelNodeId && nodes.value.length) twoNodeForm.value.tunnelNodeId = nodes.value[Math.min(1, nodes.value.length - 1)].id
+  const orderedNodes = [...nodeRows].sort((a, b) => {
+    const ao = a.status === 'online' ? 1 : 0
+    const bo = b.status === 'online' ? 1 : 0
+    if (ao !== bo) return bo - ao
+    return a.id - b.id
+  })
+  if (!twoNodeForm.value.forwardNodeId && orderedNodes.length) twoNodeForm.value.forwardNodeId = orderedNodes[0].id
+  if (!twoNodeForm.value.tunnelNodeId && orderedNodes.length) twoNodeForm.value.tunnelNodeId = orderedNodes[Math.min(1, orderedNodes.length - 1)].id
 }
 const createChain = async () => {
   await api.addChain(form.value)
