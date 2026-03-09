@@ -922,16 +922,20 @@ ORDER BY priority DESC, id LIMIT 1 FOR UPDATE SKIP LOCKED`
 				Status    string     `json:"status"`
 				EntryNode int64      `json:"entryNodeId"`
 			}
-			if json.NewDecoder(r.Body).Decode(&req) != nil || strings.TrimSpace(req.Name) == "" {
-				writeJSON(w, 400, map[string]string{"error": "invalid payload"})
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				writeJSON(w, 400, map[string]string{"error": "invalid payload", "detail": err.Error()})
+				return
+			}
+			if strings.TrimSpace(req.Name) == "" {
+				writeJSON(w, 400, map[string]string{"error": "invalid payload", "detail": "name is required"})
 				return
 			}
 			if strings.TrimSpace(req.Path) == "" && len(req.Hops) > 0 {
 				segments := []string{}
 				proto := strings.TrimSpace(req.Protocol)
-				for _, hop := range req.Hops {
+				for idx, hop := range req.Hops {
 					if hop.NodeID <= 0 || strings.TrimSpace(hop.Type) == "" {
-						writeJSON(w, 400, map[string]string{"error": "invalid payload"})
+						writeJSON(w, 400, map[string]string{"error": "invalid payload", "detail": fmt.Sprintf("hop %d requires nodeId and type", idx)})
 						return
 					}
 					if proto == "" && strings.TrimSpace(hop.Protocol) != "" {
@@ -939,12 +943,12 @@ ORDER BY priority DESC, id LIMIT 1 FOR UPDATE SKIP LOCKED`
 					}
 					if hop.Type == "forward" {
 						if strings.TrimSpace(hop.ListenAddr) == "" || strings.TrimSpace(hop.TargetAddr) == "" {
-							writeJSON(w, 400, map[string]string{"error": "invalid payload"})
+							writeJSON(w, 400, map[string]string{"error": "invalid payload", "detail": fmt.Sprintf("forward hop %d requires listenAddr and targetAddr", idx)})
 							return
 						}
 						nodeName, err := mustNodeName(hop.NodeID)
 						if err != nil {
-							writeJSON(w, 400, map[string]string{"error": "invalid payload"})
+							writeJSON(w, 400, map[string]string{"error": "invalid payload", "detail": fmt.Sprintf("forward hop %d node %d not found", idx, hop.NodeID)})
 							return
 						}
 						segments = append(segments, fmt.Sprintf("%s:forward:%s=>%s:%s", nodeName, hop.ListenAddr, hop.TargetAddr, firstNonEmpty(strings.TrimSpace(hop.Protocol), strings.TrimSpace(req.Protocol))))
@@ -959,12 +963,12 @@ ORDER BY priority DESC, id LIMIT 1 FOR UPDATE SKIP LOCKED`
 						}
 						nodeName, err := mustNodeName(hop.NodeID)
 						if err != nil {
-							writeJSON(w, 400, map[string]string{"error": "invalid payload"})
+							writeJSON(w, 400, map[string]string{"error": "invalid payload", "detail": fmt.Sprintf("tunnel hop %d node %d not found", idx, hop.NodeID)})
 							return
 						}
 						segments = append(segments, fmt.Sprintf("%s:tunnel:%s:%s", nodeName, mode, listen))
 					} else {
-						writeJSON(w, 400, map[string]string{"error": "invalid payload"})
+						writeJSON(w, 400, map[string]string{"error": "invalid payload", "detail": fmt.Sprintf("unsupported hop type %q at index %d", hop.Type, idx)})
 						return
 					}
 				}
@@ -972,7 +976,7 @@ ORDER BY priority DESC, id LIMIT 1 FOR UPDATE SKIP LOCKED`
 				req.Protocol = firstNonEmpty(strings.TrimSpace(req.Protocol), proto)
 			}
 			if strings.TrimSpace(req.Path) == "" {
-				writeJSON(w, 400, map[string]string{"error": "invalid payload"})
+				writeJSON(w, 400, map[string]string{"error": "invalid payload", "detail": "path is empty after payload normalization"})
 				return
 			}
 			description := "pending orchestration"
