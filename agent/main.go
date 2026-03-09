@@ -110,11 +110,11 @@ func (a *Agent) executeTask(t *Task) (string, map[string]any) {
 	case "gost.apply_tunnel":
 		out, err = a.applyTunnel(p)
 	case "gost.start":
-		out, err = serviceAction(p.Name, "start")
+		out, err = ensureGostAndRun(func() (string, error) { return serviceAction(p.Name, "start") })
 	case "gost.stop":
 		out, err = serviceAction(p.Name, "stop")
 	case "gost.restart":
-		out, err = serviceAction(p.Name, "restart")
+		out, err = ensureGostAndRun(func() (string, error) { return serviceAction(p.Name, "restart") })
 	case "gost.status":
 		out, err = serviceAction(p.Name, "status")
 	default:
@@ -137,7 +137,9 @@ func (a *Agent) applyTunnel(p GostPayload) (string, error) {
 	case "http": uri = "http://" + p.Listen
 	default: return "", fmt.Errorf("unsupported tunnel mode: %s", mode)
 	}
-	return writeServiceAndStart(p.Name, fmt.Sprintf("/usr/local/bin/gost -L %s", uri))
+	return ensureGostAndRun(func() (string, error) {
+		return writeServiceAndStart(p.Name, fmt.Sprintf("/usr/local/bin/gost -L %s", uri))
+	})
 }
 
 func (a *Agent) applyForward(p GostPayload) (string, error) {
@@ -145,16 +147,43 @@ func (a *Agent) applyForward(p GostPayload) (string, error) {
 	if p.Listen == "" || p.Target == "" { return "", fmt.Errorf("listen/target required") }
 	proto := p.Protocol
 	if proto == "" { proto = "tcp" }
-	return writeServiceAndStart(p.Name, fmt.Sprintf("/usr/local/bin/gost -L %s://%s/%s", proto, p.Listen, p.Target))
+	return ensureGostAndRun(func() (string, error) {
+		return writeServiceAndStart(p.Name, fmt.Sprintf("/usr/local/bin/gost -L %s://%s/%s", proto, p.Listen, p.Target))
+	})
 }
 
 func installGost() (string, error) {
-	if _, err := exec.LookPath("gost"); err == nil { return "gost already installed", nil }
-	arch := map[string]string{"x86_64":"amd64","aarch64":"arm64"}[run("uname -m")]
+	if _, err := os.Stat("/usr/local/bin/gost"); err == nil {
+		return "/usr/local/bin/gost already installed", nil
+	}
+	if _, err := exec.LookPath("gost"); err == nil {
+		return "gost already installed in PATH", nil
+	}
+	arch := map[string]string{"x86_64":"amd64","aarch64":"arm64"}[strings.TrimSpace(run("uname -m"))]
 	if arch == "" { arch = "amd64" }
 	url := fmt.Sprintf("https://github.com/go-gost/gost/releases/latest/download/gost_3.0.0_linux_%s.tar.gz", arch)
-	cmd := fmt.Sprintf("set -e; cd /tmp; curl -fsSL -o gost.tgz %s; tar -xzf gost.tgz; install -m 0755 gost /usr/local/bin/gost", shellEscape(url))
-	return run(cmd), cmdErr(cmd)
+	cmd := fmt.Sprintf("set -e; tmpdir=$(mktemp -d); cd \"$tmpdir\"; curl -fsSL -o gost.tgz %s; tar -xzf gost.tgz; install -m 0755 gost /usr/local/bin/gost", shellEscape(url))
+	out := run(cmd)
+	if err := cmdErr(cmd); err != nil {
+		return out, err
+	}
+	if _, err := os.Stat("/usr/local/bin/gost"); err != nil {
+		return out, fmt.Errorf("gost install finished but /usr/local/bin/gost not found")
+	}
+	return out + "\ninstalled /usr/local/bin/gost", nil
+}
+
+func ensureGostAndRun(fn func() (string, error)) (string, error) {
+	installOut, err := installGost()
+	if err != nil {
+		return installOut, err
+	}
+	runOut, runErr := fn()
+	combined := strings.TrimSpace(strings.TrimSpace(installOut) + "\n" + strings.TrimSpace(runOut))
+	if runErr != nil {
+		return combined, runErr
+	}
+	return combined, nil
 }
 
 func writeServiceAndStart(name, execLine string) (string, error) {
