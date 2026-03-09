@@ -51,8 +51,8 @@
             <template v-else>{{ c.protocol }}</template>
           </td>
           <td><span :class="['badge', c.enabled ? 'online' : 'offline']">{{ c.enabled ? 'enabled' : 'draft' }}</span></td>
-          <td><span :class="['badge', chainMismatch(c) ? 'offline' : (chainState(c.id)?.allRunning ? 'online' : '')]">{{ chainState(c.id)?.allRunning ? 'all-running' : 'partial' }}</span></td>
-          <td>{{ c.description || '待绑定真实节点任务' }}</td>
+          <td><span :class="['badge', chainMismatch(c) ? 'offline' : (chainState(c.id)?.allRunning ? 'online' : '')]">{{ chainStateLabel(c.id) }}</span></td>
+          <td>{{ chainDescription(c) }}</td>
           <td>
             <button @click="toggle(c.id)">{{ c.enabled ? '停用' : '启用' }}</button>
             <button v-if="editingId !== c.id" @click="startEdit(c)">编辑</button>
@@ -73,7 +73,7 @@
           <td>#{{ row.index }}</td>
           <td>{{ row.nodeName }}</td>
           <td>{{ row.serviceName }}</td>
-          <td><span :class="['badge', row.actualRunning ? 'online' : 'offline']">{{ row.actualRunning ? 'running' : 'not-running' }}</span></td>
+          <td><span :class="['badge', row.actualRunning ? 'online' : (row.nodeOnline ? 'offline' : '')]">{{ row.actualRunning ? 'running' : (row.nodeOnline ? 'not-running' : 'node-offline') }}</span></td>
         </tr>
       </tbody>
     </table>
@@ -104,6 +104,21 @@ const chainMismatch = (chain) => {
   const state = chainState(chain.id)
   if (!state) return false
   return chain.enabled ? !state.allRunning : state.allRunning
+}
+const chainStateLabel = (id) => {
+  const state = chainState(id)
+  if (!state) return 'unknown'
+  if (state.allRunning) return 'all-running'
+  if (state.offlineHops > 0) return 'waiting-nodes'
+  if (state.pendingTasks > 0) return 'pending-tasks'
+  return 'partial'
+}
+const chainDescription = (chain) => {
+  const state = chainState(chain.id)
+  if (!state) return chain.description || '待绑定真实节点任务'
+  if (state.offlineHops > 0) return `${chain.description || 'pending'} · ${state.offlineHops} hop 节点离线`
+  if (state.pendingTasks > 0) return `${chain.description || 'pending'} · ${state.pendingTasks} 个任务待执行`
+  return chain.description || '待绑定真实节点任务'
 }
 const sortedChains = computed(() => [...chains.value].sort((a, b) => {
   const am = chainMismatch(a) ? 1 : 0

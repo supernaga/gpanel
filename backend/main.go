@@ -897,6 +897,8 @@ ORDER BY priority DESC, id LIMIT 1 FOR UPDATE SKIP LOCKED`
 		for _, c := range chains {
 			hopStates := []map[string]any{}
 			allRunning := true
+			offlineHops := 0
+			pendingTasks := 0
 			parts := strings.Split(c.Path, "->")
 			for i, rawHop := range parts {
 				hop := strings.TrimSpace(rawHop)
@@ -906,14 +908,28 @@ ORDER BY priority DESC, id LIMIT 1 FOR UPDATE SKIP LOCKED`
 				nodeName := strings.TrimSpace(strings.SplitN(hop, ":", 2)[0])
 				serviceName := fmt.Sprintf("gost-%s-hop-%d.service", c.Name, i+1)
 				running := serviceStateByNode[nodeName][serviceName]
+				nodeOnline := false
+				for _, n := range nodes {
+					if n.Name == nodeName {
+						nodeOnline = n.Status == "online"
+						break
+					}
+				}
 				if !running {
 					allRunning = false
 				}
+				if !nodeOnline {
+					offlineHops++
+				}
+				var hopPending int
+				_ = app.db.QueryRow(`SELECT COUNT(*) FROM agent_tasks WHERE node_name=$1 AND status='pending' AND command IN ('gost.apply_forward','gost.apply_tunnel') AND payload LIKE $2`, nodeName, "%\"name\":\""+c.Name+"-hop-%").Scan(&hopPending)
+				pendingTasks += hopPending
 				hopStates = append(hopStates, map[string]any{
 					"index": i + 1,
 					"nodeName": nodeName,
 					"serviceName": serviceName,
 					"actualRunning": running,
+					"nodeOnline": nodeOnline,
 				})
 			}
 			chainStates = append(chainStates, map[string]any{
@@ -922,6 +938,8 @@ ORDER BY priority DESC, id LIMIT 1 FOR UPDATE SKIP LOCKED`
 				"enabled": c.Enabled,
 				"description": c.Description,
 				"allRunning": allRunning,
+				"offlineHops": offlineHops,
+				"pendingTasks": pendingTasks,
 				"hops": hopStates,
 			})
 		}
