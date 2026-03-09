@@ -752,12 +752,12 @@ ORDER BY priority DESC, id LIMIT 1 FOR UPDATE SKIP LOCKED`
 				rest := strings.TrimSpace(parts[1])
 				mode := firstNonEmpty(strings.TrimSpace(protocol), "socks5")
 				listen := ":1080"
-				restParts := strings.Split(rest, ":")
+				restParts := strings.SplitN(rest, ":", 2)
 				if len(restParts) >= 1 && strings.TrimSpace(restParts[0]) != "" {
 					mode = strings.TrimSpace(restParts[0])
 				}
-				if len(restParts) >= 2 {
-					listen = ":" + strings.Join(restParts[1:], ":")
+				if len(restParts) == 2 && strings.TrimSpace(restParts[1]) != "" {
+					listen = ":" + strings.TrimSpace(restParts[1])
 				}
 				if err := scheduleTunnel(nodeName, stepName, mode, listen); err != nil {
 					return err
