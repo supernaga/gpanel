@@ -63,7 +63,7 @@
           <td>{{ f.protocol }}</td>
           <td>{{ findForwardState(f.id)?.nodeName || ('#' + f.nodeId) }}</td>
           <td><span :class="['badge', f.status === 'enabled' ? 'online' : 'offline']">{{ f.status }}</span></td>
-          <td><span :class="['badge', findForwardState(f.id)?.actualRunning ? 'online' : 'offline']">{{ findForwardState(f.id)?.actualRunning ? 'running' : 'not-running' }}</span></td>
+          <td><span :class="['badge', forwardMismatch(f) ? 'offline' : (findForwardState(f.id)?.actualRunning ? 'online' : '')]">{{ findForwardState(f.id)?.actualRunning ? 'running' : 'not-running' }}</span></td>
           <td>{{ findForwardState(f.id)?.serviceName || '-' }}</td>
         </tr>
       </tbody>
@@ -79,7 +79,7 @@
           <td>{{ t.listen }}</td>
           <td>{{ findTunnelState(t.id)?.nodeName || ('#' + t.nodeId) }}</td>
           <td><span :class="['badge', t.enabled ? 'online' : 'offline']">{{ t.enabled ? 'enabled' : 'disabled' }}</span></td>
-          <td><span :class="['badge', findTunnelState(t.id)?.actualRunning ? 'online' : 'offline']">{{ findTunnelState(t.id)?.actualRunning ? 'running' : 'not-running' }}</span></td>
+          <td><span :class="['badge', tunnelMismatch(t) ? 'offline' : (findTunnelState(t.id)?.actualRunning ? 'online' : '')]">{{ findTunnelState(t.id)?.actualRunning ? 'running' : 'not-running' }}</span></td>
           <td>{{ findTunnelState(t.id)?.serviceName || '-' }}</td>
           <td>{{ t.description }}</td>
         </tr>
@@ -95,7 +95,7 @@
           <td>{{ c.path }}</td>
           <td>{{ c.protocol }}</td>
           <td><span :class="['badge', c.enabled ? 'online' : 'offline']">{{ c.enabled ? 'enabled' : 'draft' }}</span></td>
-          <td><span :class="['badge', findChainState(c.id)?.allRunning ? 'online' : 'offline']">{{ findChainState(c.id)?.allRunning ? 'all-running' : 'partial' }}</span></td>
+          <td><span :class="['badge', chainMismatch(c) ? 'offline' : (findChainState(c.id)?.allRunning ? 'online' : '')]">{{ findChainState(c.id)?.allRunning ? 'all-running' : 'partial' }}</span></td>
           <td>{{ c.description }}</td>
         </tr>
       </tbody>
@@ -145,6 +145,21 @@ const parseList = (value) => {
 const findForwardState = (id) => (details.value.forwardStates || []).find(item => item.id === id)
 const findTunnelState = (id) => (details.value.tunnelStates || []).find(item => item.id === id)
 const findChainState = (id) => (details.value.chainStates || []).find(item => item.id === id)
+const forwardMismatch = (forward) => {
+  const state = findForwardState(forward.id)
+  if (!state) return false
+  return forward.status === 'enabled' ? !state.actualRunning : state.actualRunning
+}
+const tunnelMismatch = (tunnel) => {
+  const state = findTunnelState(tunnel.id)
+  if (!state) return false
+  return tunnel.enabled ? !state.actualRunning : state.actualRunning
+}
+const chainMismatch = (chain) => {
+  const state = findChainState(chain.id)
+  if (!state) return false
+  return chain.enabled ? !state.allRunning : state.allRunning
+}
 const chainHopRows = computed(() => (details.value.chainStates || []).flatMap(chain =>
   (chain.hops || []).map(hop => ({
     key: `${chain.id}-${hop.index}`,
