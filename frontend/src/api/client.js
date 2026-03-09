@@ -59,6 +59,8 @@ export const api = {
 
   forwards: () => req('/api/forwards'),
   addForward: (payload) => req('/api/forwards', { method: 'POST', body: JSON.stringify(payload) }),
+  updateForward: (id, payload) => req(`/api/forwards/${id}/update`, { method: 'PATCH', body: JSON.stringify(payload) }),
+  deleteForward: (id) => req(`/api/forwards/${id}/delete`, { method: 'DELETE' }),
   toggleForward: (id) => req(`/api/forwards/${id}/toggle`, { method: 'PATCH' }),
 
   rules: () => req('/api/rules'),

@@ -1309,31 +1309,48 @@ ORDER BY priority DESC, id LIMIT 1 FOR UPDATE SKIP LOCKED`
 		}
 	})
 	api.HandleFunc("/api/forwards/", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPatch {
-			w.WriteHeader(http.StatusMethodNotAllowed)
-			return
-		}
-		id, err := parseID(r.URL.Path, "forwards", "toggle")
-		if err != nil {
+		parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+		if len(parts) != 4 || parts[0] != "api" || parts[1] != "forwards" {
 			writeJSON(w, 400, map[string]string{"error": "bad path"})
 			return
 		}
-		_, _ = app.db.Exec(`UPDATE forwards SET status=CASE WHEN status='enabled' THEN 'disabled' ELSE 'enabled' END, updated_at=now() WHERE id=$1`, id)
-		var f ForwardRule
-		err = app.db.QueryRow(`SELECT id,name,listen_addr,target_addr,protocol,status,node_id,connections,updated_at FROM forwards WHERE id=$1`, id).Scan(&f.ID, &f.Name, &f.ListenAddr, &f.TargetAddr, &f.Protocol, &f.Status, &f.NodeID, &f.Connections, &f.UpdatedAt)
+		id, err := strconv.ParseInt(parts[2], 10, 64)
 		if err != nil {
-			writeJSON(w, 404, map[string]string{"error": "forward not found"})
+			writeJSON(w, 400, map[string]string{"error": "invalid id"})
 			return
 		}
-		var nodeName string
-		_ = app.db.QueryRow(`SELECT name FROM nodes WHERE id=$1`, f.NodeID).Scan(&nodeName)
-		if f.Status == "enabled" {
-			_ = createNodeTask(nodeName, "gost.start", map[string]any{"name": f.Name})
-		} else {
-			_ = createNodeTask(nodeName, "gost.stop", map[string]any{"name": f.Name})
+		action := parts[3]
+		switch {
+		case action == "update" && r.Method == http.MethodPatch:
+			var req struct{ Name, ListenAddr, TargetAddr, Protocol string; NodeID int64 }
+			if json.NewDecoder(r.Body).Decode(&req) != nil { writeJSON(w, 400, map[string]string{"error": "invalid payload"}); return }
+			_, err := app.db.Exec(`UPDATE forwards SET name=COALESCE(NULLIF($2,''),name), listen_addr=COALESCE(NULLIF($3,''),listen_addr), target_addr=COALESCE(NULLIF($4,''),target_addr), protocol=COALESCE(NULLIF($5,''),protocol), node_id=COALESCE(NULLIF($6,0),node_id), updated_at=now() WHERE id=$1`, id, req.Name, req.ListenAddr, req.TargetAddr, req.Protocol, req.NodeID)
+			if err != nil { writeJSON(w, 500, map[string]string{"error": err.Error()}); return }
+			app.audit(r.Context(), "forward.update", fmt.Sprintf("forward/%d", id), "updated")
+			writeJSON(w, 200, map[string]any{"ok": true})
+		case action == "delete" && r.Method == http.MethodDelete:
+			res, _ := app.db.Exec(`DELETE FROM forwards WHERE id=$1`, id)
+			aff, _ := res.RowsAffected()
+			if aff == 0 { writeJSON(w, 404, map[string]string{"error": "forward not found"}); return }
+			app.audit(r.Context(), "forward.delete", fmt.Sprintf("forward/%d", id), "deleted")
+			writeJSON(w, 200, map[string]any{"ok": true})
+		case action == "toggle" && r.Method == http.MethodPatch:
+			_, _ = app.db.Exec(`UPDATE forwards SET status=CASE WHEN status='enabled' THEN 'disabled' ELSE 'enabled' END, updated_at=now() WHERE id=$1`, id)
+			var f ForwardRule
+			err = app.db.QueryRow(`SELECT id,name,listen_addr,target_addr,protocol,status,node_id,connections,updated_at FROM forwards WHERE id=$1`, id).Scan(&f.ID, &f.Name, &f.ListenAddr, &f.TargetAddr, &f.Protocol, &f.Status, &f.NodeID, &f.Connections, &f.UpdatedAt)
+			if err != nil {
+				writeJSON(w, 404, map[string]string{"error": "forward not found"})
+				return
+			}
+			nodeName, err := mustNodeName(f.NodeID)
+			if err == nil {
+				if f.Status == "enabled" { _ = createNodeTask(nodeName, "gost.start", map[string]any{"name": f.Name}) } else { _ = createNodeTask(nodeName, "gost.stop", map[string]any{"name": f.Name}) }
+			}
+			app.audit(r.Context(), "forward.toggle", fmt.Sprintf("forward/%d", f.ID), f.Status)
+			writeJSON(w, 200, f)
+		default:
+			w.WriteHeader(http.StatusMethodNotAllowed)
 		}
-		app.audit(r.Context(), "forward.toggle", fmt.Sprintf("forward/%d", f.ID), f.Status)
-		writeJSON(w, 200, f)
 	})
 
 	api.HandleFunc("/api/rules", func(w http.ResponseWriter, r *http.Request) {
