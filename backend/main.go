@@ -197,6 +197,15 @@ func mustEnv(key, fallback string) string {
 	return v
 }
 
+func firstNonEmpty(values ...string) string {
+	for _, v := range values {
+		if strings.TrimSpace(v) != "" {
+			return strings.TrimSpace(v)
+		}
+	}
+	return ""
+}
+
 func (a *App) initSchema(ctx context.Context) error {
 	schema := `
 CREATE TABLE IF NOT EXISTS users (
