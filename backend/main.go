@@ -932,6 +932,7 @@ ORDER BY priority DESC, id LIMIT 1 FOR UPDATE SKIP LOCKED`
 					"nodeOnline": nodeOnline,
 				})
 			}
+			readyHops := len(hopStates) - offlineHops
 			chainStates = append(chainStates, map[string]any{
 				"id": c.ID,
 				"name": c.Name,
@@ -939,6 +940,8 @@ ORDER BY priority DESC, id LIMIT 1 FOR UPDATE SKIP LOCKED`
 				"description": c.Description,
 				"allRunning": allRunning,
 				"offlineHops": offlineHops,
+				"readyHops": readyHops,
+				"totalHops": len(hopStates),
 				"pendingTasks": pendingTasks,
 				"hops": hopStates,
 			})

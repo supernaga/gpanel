@@ -116,9 +116,12 @@ const chainStateLabel = (id) => {
 const chainDescription = (chain) => {
   const state = chainState(chain.id)
   if (!state) return chain.description || '待绑定真实节点任务'
-  if (state.offlineHops > 0) return `${chain.description || 'pending'} · ${state.offlineHops} hop 节点离线`
-  if (state.pendingTasks > 0) return `${chain.description || 'pending'} · ${state.pendingTasks} 个任务待执行`
-  return chain.description || '待绑定真实节点任务'
+  const readiness = typeof state.readyHops === 'number' && typeof state.totalHops === 'number'
+    ? ` · 节点就绪 ${state.readyHops}/${state.totalHops}`
+    : ''
+  if (state.offlineHops > 0) return `${chain.description || 'pending'} · ${state.offlineHops} hop 节点离线${readiness}`
+  if (state.pendingTasks > 0) return `${chain.description || 'pending'} · ${state.pendingTasks} 个任务待执行${readiness}`
+  return `${chain.description || '待绑定真实节点任务'}${readiness}`
 }
 const sortedChains = computed(() => [...chains.value].sort((a, b) => {
   const am = chainMismatch(a) ? 1 : 0
