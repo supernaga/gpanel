@@ -119,7 +119,7 @@ const chainDescription = (chain) => {
   const readiness = typeof state.readyHops === 'number' && typeof state.totalHops === 'number'
     ? ` · 节点就绪 ${state.readyHops}/${state.totalHops}`
     : ''
-  if (state.offlineHops > 0) return `${chain.description || 'pending'} · ${state.offlineHops} hop 节点离线${readiness}`
+  if (state.offlineHops > 0) return `${chain.description || 'pending'} · ${state.offlineHops} hop 节点离线，等待对应 agent 接入${readiness}`
   if (state.pendingTasks > 0) return `${chain.description || 'pending'} · ${state.pendingTasks} 个任务待执行${readiness}`
   return `${chain.description || '待绑定真实节点任务'}${readiness}`
 }
