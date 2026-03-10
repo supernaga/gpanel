@@ -11,6 +11,11 @@
       </form>
     </div>
 
+    <div class="card" style="margin-bottom:16px">
+      <p><strong>第二节点接入路径</strong></p>
+      <p class="hint">1) 先创建 offline / pending-agent 草稿节点；2) 在目标主机运行 install-agent.sh 并使用同一 panel URL + agent token；3) agent 心跳到达后，节点会从草稿状态变成真实在线节点。</p>
+    </div>
+
     <table>
       <thead>
         <tr><th>ID</th><th>名称</th><th>区域</th><th>状态</th><th>延迟</th><th>版本</th><th>操作</th></tr>
