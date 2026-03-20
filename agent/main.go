@@ -4,15 +4,17 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
 	"github.com/go-resty/resty/v2"
 )
+
+var safeServiceName = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
 
 type TaskEnvelope struct {
 	Task *Task `json:"task"`
@@ -46,12 +48,12 @@ type Agent struct {
 
 func main() {
 	a := &Agent{
-		panelURL: strings.TrimRight(os.Getenv("PANEL_URL"), "/"),
-		token: os.Getenv("AGENT_TOKEN"),
-		nodeUID: firstNonEmpty(os.Getenv("NODE_UID"), hostID()),
-		nodeName: firstNonEmpty(os.Getenv("NODE_NAME"), "node-"+hostName()),
-		nodeIP: firstNonEmpty(os.Getenv("NODE_IP"), localIP()),
-		version: firstNonEmpty(os.Getenv("AGENT_VERSION"), "v0.3.0"),
+		panelURL:   strings.TrimRight(os.Getenv("PANEL_URL"), "/"),
+		token:      os.Getenv("AGENT_TOKEN"),
+		nodeUID:    firstNonEmpty(os.Getenv("NODE_UID"), hostID()),
+		nodeName:   firstNonEmpty(os.Getenv("NODE_NAME"), "node-"+hostName()),
+		nodeIP:     firstNonEmpty(os.Getenv("NODE_IP"), localIP()),
+		version:    firstNonEmpty(os.Getenv("AGENT_VERSION"), "v0.3.0"),
 		serviceDir: "/etc/systemd/system",
 	}
 	if a.panelURL == "" || a.token == "" {
@@ -68,14 +70,14 @@ func main() {
 
 func (a *Agent) heartbeat() {
 	payload := map[string]any{
-		"nodeUid": a.nodeUID,
-		"nodeName": a.nodeName,
-		"nodeIp": a.nodeIP,
-		"version": a.version,
-		"latencyMs": 20,
-		"region": "Unknown",
+		"nodeUid":      a.nodeUID,
+		"nodeName":     a.nodeName,
+		"nodeIp":       a.nodeIP,
+		"version":      a.version,
+		"latencyMs":    20,
+		"region":       "Unknown",
 		"capabilities": []string{"gost.install", "gost.apply_forward", "gost.apply_tunnel", "gost.start", "gost.stop", "gost.restart", "gost.status"},
-		"services": listGostServices(),
+		"services":     listGostServices(),
 	}
 	_, _ = a.client.R().SetHeader("Authorization", "Bearer "+a.token).SetBody(payload).Post(a.panelURL + "/api/agent/heartbeat")
 }
@@ -123,19 +125,28 @@ func (a *Agent) executeTask(t *Task) (string, map[string]any) {
 	if err != nil {
 		return "failed", map[string]any{"ok": false, "command": t.Command, "node": a.nodeName, "error": outOrErr(out, err)}
 	}
-	return "success", map[string]any{"ok": true, "command": t.Command, "node": a.nodeName, "output": out}
+	return "done", map[string]any{"ok": true, "command": t.Command, "node": a.nodeName, "output": out}
 }
 
 func (a *Agent) applyTunnel(p GostPayload) (string, error) {
-	if p.Name == "" { p.Name = "tunnel" }
-	if p.Listen == "" { p.Listen = ":1080" }
+	if p.Name == "" {
+		p.Name = "tunnel"
+	}
+	if p.Listen == "" {
+		p.Listen = ":1080"
+	}
 	mode := p.Mode
-	if mode == "" { mode = "socks5" }
+	if mode == "" {
+		mode = "socks5"
+	}
 	var uri string
 	switch mode {
-	case "socks5": uri = "socks5://" + p.Listen
-	case "http": uri = "http://" + p.Listen
-	default: return "", fmt.Errorf("unsupported tunnel mode: %s", mode)
+	case "socks5":
+		uri = "socks5://" + p.Listen
+	case "http":
+		uri = "http://" + p.Listen
+	default:
+		return "", fmt.Errorf("unsupported tunnel mode: %s", mode)
 	}
 	return ensureGostAndRun(func() (string, error) {
 		return writeServiceAndStart(p.Name, fmt.Sprintf("/usr/local/bin/gost -L %s", uri))
@@ -143,10 +154,16 @@ func (a *Agent) applyTunnel(p GostPayload) (string, error) {
 }
 
 func (a *Agent) applyForward(p GostPayload) (string, error) {
-	if p.Name == "" { p.Name = "forward" }
-	if p.Listen == "" || p.Target == "" { return "", fmt.Errorf("listen/target required") }
+	if p.Name == "" {
+		p.Name = "forward"
+	}
+	if p.Listen == "" || p.Target == "" {
+		return "", fmt.Errorf("listen/target required")
+	}
 	proto := p.Protocol
-	if proto == "" { proto = "tcp" }
+	if proto == "" {
+		proto = "tcp"
+	}
 	return ensureGostAndRun(func() (string, error) {
 		return writeServiceAndStart(p.Name, fmt.Sprintf("/usr/local/bin/gost -L %s://%s/%s", proto, p.Listen, p.Target))
 	})
@@ -159,11 +176,11 @@ func installGost() (string, error) {
 	if _, err := exec.LookPath("gost"); err == nil {
 		return "gost already installed in PATH", nil
 	}
-	arch := map[string]string{"x86_64":"amd64","aarch64":"arm64"}[strings.TrimSpace(run("uname -m"))]
+	arch := map[string]string{"x86_64": "amd64", "aarch64": "arm64"}[strings.TrimSpace(runBestEffort("uname -m"))]
 	if arch == "" {
 		arch = "amd64"
 	}
-	tag := strings.TrimSpace(run("curl -fsSL https://api.github.com/repos/go-gost/gost/releases/latest | sed -n 's/.*\"tag_name\": \"\\([^\"]*\\)\".*/\\1/p' | head -n 1"))
+	tag := strings.TrimSpace(runBestEffort("curl -fsSL https://api.github.com/repos/go-gost/gost/releases/latest | sed -n 's/.*\"tag_name\": \"\\([^\"]*\\)\".*/\\1/p' | head -n 1"))
 	if tag == "" {
 		return "", fmt.Errorf("failed to resolve latest gost release tag")
 	}
@@ -171,14 +188,14 @@ func installGost() (string, error) {
 	asset := fmt.Sprintf("gost_%s_linux_%s.tar.gz", version, arch)
 	url := fmt.Sprintf("https://github.com/go-gost/gost/releases/download/%s/%s", tag, asset)
 	cmd := fmt.Sprintf("set -e; tmpdir=$(mktemp -d); cd \"$tmpdir\"; curl -fsSL -o gost.tgz %s; tar -xzf gost.tgz; install -m 0755 gost /usr/local/bin/gost", shellEscape(url))
-	out := run(cmd)
-	if err := cmdErr(cmd); err != nil {
+	out, err := run(cmd)
+	if err != nil {
 		return out, err
 	}
 	if _, err := os.Stat("/usr/local/bin/gost"); err != nil {
 		return out, fmt.Errorf("gost install finished but /usr/local/bin/gost not found")
 	}
-	return strings.TrimSpace(out+"\ninstalled /usr/local/bin/gost from "+url), nil
+	return strings.TrimSpace(out + "\ninstalled /usr/local/bin/gost from " + url), nil
 }
 
 func ensureGostAndRun(fn func() (string, error)) (string, error) {
@@ -195,26 +212,33 @@ func ensureGostAndRun(fn func() (string, error)) (string, error) {
 }
 
 func writeServiceAndStart(name, execLine string) (string, error) {
+	service, err := serviceUnitName(name)
+	if err != nil {
+		return "", err
+	}
 	unit := fmt.Sprintf("[Unit]\nDescription=GOST %s\nAfter=network.target\n\n[Service]\nType=simple\nExecStart=%s\nRestart=always\nRestartSec=2\n\n[Install]\nWantedBy=multi-user.target\n", name, execLine)
-	path := filepath.Join("/etc/systemd/system", "gost-"+name+".service")
+	path := filepath.Join("/etc/systemd/system", service)
 	if err := os.WriteFile(path, []byte(unit), 0644); err != nil {
 		return "", err
 	}
-	cmd := fmt.Sprintf("systemctl daemon-reload && systemctl enable --now gost-%s.service", name)
-	out := run(cmd)
-	if err := cmdErr(cmd); err != nil {
+	cmd := fmt.Sprintf("systemctl daemon-reload && systemctl enable --now %s", service)
+	out, err := run(cmd)
+	if err != nil {
 		return out, err
 	}
 	return verifyServiceRunning(name)
 }
 
 func verifyServiceRunning(name string) (string, error) {
-	service := fmt.Sprintf("gost-%s.service", name)
+	service, err := serviceUnitName(name)
+	if err != nil {
+		return "", err
+	}
 	deadline := time.Now().Add(12 * time.Second)
 	for time.Now().Before(deadline) {
-		state := strings.TrimSpace(run(fmt.Sprintf("systemctl is-active %s 2>/dev/null || true", service)))
+		state := strings.TrimSpace(runBestEffort(fmt.Sprintf("systemctl is-active %s 2>/dev/null || true", service)))
 		if state == "active" {
-			statusOut := strings.TrimSpace(run(fmt.Sprintf("systemctl status %s --no-pager", service)))
+			statusOut := strings.TrimSpace(runBestEffort(fmt.Sprintf("systemctl status %s --no-pager", service)))
 			if statusOut == "" {
 				statusOut = service + " active"
 			}
@@ -222,8 +246,8 @@ func verifyServiceRunning(name string) (string, error) {
 		}
 		time.Sleep(1500 * time.Millisecond)
 	}
-	statusOut := strings.TrimSpace(run(fmt.Sprintf("systemctl status %s --no-pager || true", service)))
-	journalOut := strings.TrimSpace(run(fmt.Sprintf("journalctl -u %s -n 40 --no-pager || true", service)))
+	statusOut := strings.TrimSpace(runBestEffort(fmt.Sprintf("systemctl status %s --no-pager || true", service)))
+	journalOut := strings.TrimSpace(runBestEffort(fmt.Sprintf("journalctl -u %s -n 40 --no-pager || true", service)))
 	combined := strings.TrimSpace(statusOut)
 	if journalOut != "" {
 		if combined != "" {
@@ -238,13 +262,19 @@ func verifyServiceRunning(name string) (string, error) {
 }
 
 func serviceAction(name, action string) (string, error) {
-	cmd := fmt.Sprintf("systemctl %s gost-%s.service", action, name)
-	if action == "status" { cmd = fmt.Sprintf("systemctl status gost-%s.service --no-pager", name) }
-	return run(cmd), cmdErr(cmd)
+	service, err := serviceUnitName(name)
+	if err != nil {
+		return "", err
+	}
+	cmd := fmt.Sprintf("systemctl %s %s", action, service)
+	if action == "status" {
+		cmd = fmt.Sprintf("systemctl status %s --no-pager", service)
+	}
+	return run(cmd)
 }
 
 func listGostServices() []string {
-	out := strings.TrimSpace(run("systemctl list-units --type=service --all 'gost-*.service' --no-legend | awk '{print $1}'"))
+	out := strings.TrimSpace(runBestEffort("systemctl list-units --type=service --all 'gost-*.service' --no-legend | awk '{print $1}'"))
 	if out == "" {
 		return []string{}
 	}
@@ -258,25 +288,67 @@ func listGostServices() []string {
 	return items
 }
 
-func run(cmd string) string {
+func run(cmd string) (string, error) {
 	c := exec.Command("bash", "-lc", cmd)
 	var buf bytes.Buffer
 	c.Stdout = &buf
 	c.Stderr = &buf
-	_ = c.Run()
-	return buf.String()
+	err := c.Run()
+	out := buf.String()
+	if err != nil {
+		msg := strings.TrimSpace(out)
+		if msg == "" {
+			msg = err.Error()
+		}
+		return out, fmt.Errorf("%s", msg)
+	}
+	return out, nil
 }
-func cmdErr(cmd string) error {
-	c := exec.Command("bash", "-lc", cmd)
-	var stderr bytes.Buffer
-	c.Stdout = io.Discard
-	c.Stderr = &stderr
-	if err := c.Run(); err != nil { return fmt.Errorf("%s", strings.TrimSpace(stderr.String())) }
+
+func runBestEffort(cmd string) string {
+	out, _ := run(cmd)
+	return out
+}
+
+func validateServiceName(name string) error {
+	if !safeServiceName.MatchString(name) {
+		return fmt.Errorf("invalid service name %q", name)
+	}
 	return nil
 }
+
+func serviceUnitName(name string) (string, error) {
+	if err := validateServiceName(name); err != nil {
+		return "", err
+	}
+	return "gost-" + name + ".service", nil
+}
+
 func shellEscape(s string) string { return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'" }
-func firstNonEmpty(v, fallback string) string { if v != "" { return v }; return fallback }
-func hostID() string { b, _ := os.ReadFile("/etc/machine-id"); if len(bytes.TrimSpace(b)) > 0 { return strings.TrimSpace(string(b)) }; return hostName() }
-func hostName() string { h, _ := os.Hostname(); if h == "" { return "unknown" }; return h }
-func localIP() string { return run("hostname -I | awk '{print $1}'") }
-func outOrErr(out string, err error) string { if strings.TrimSpace(out) != "" { return out }; return err.Error() }
+func firstNonEmpty(v, fallback string) string {
+	if v != "" {
+		return v
+	}
+	return fallback
+}
+func hostID() string {
+	b, _ := os.ReadFile("/etc/machine-id")
+	if len(bytes.TrimSpace(b)) > 0 {
+		return strings.TrimSpace(string(b))
+	}
+	return hostName()
+}
+func hostName() string {
+	h, _ := os.Hostname()
+	if h == "" {
+		return "unknown"
+	}
+	return h
+}
+func localIP() string { return strings.TrimSpace(runBestEffort("hostname -I | awk '{print $1}'")) }
+func outOrErr(out string, err error) string {
+	if strings.TrimSpace(out) != "" {
+		return out
+	}
+	return err.Error()
+}

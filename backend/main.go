@@ -25,19 +25,21 @@ type ctxKey string
 const (
 	ctxUserID   ctxKey = "uid"
 	ctxUserRole ctxKey = "role"
+	wsProtocol  string = "gpanel.v1"
 )
 
 type App struct {
-	db               *sql.DB
-	jwtSecret        []byte
-	agentToken       string
-	webhookURL       string
-	offlineMinutes     int
-	alertDedupeMins    int
-	taskTimeoutSecs    int
-	taskMaxRetries     int
+	db                  *sql.DB
+	jwtSecret           []byte
+	agentToken          string
+	webhookURL          string
+	allowedOrigins      map[string]struct{}
+	offlineMinutes      int
+	alertDedupeMins     int
+	taskTimeoutSecs     int
+	taskMaxRetries      int
 	taskDispatchPerNode int
-	alertSilentHours   string
+	alertSilentHours    string
 }
 
 type Claims struct {
@@ -123,20 +125,20 @@ type AuditLog struct {
 }
 
 type AgentTask struct {
-	ID            int64      `json:"id"`
-	NodeUID       string     `json:"nodeUid"`
-	NodeName      string     `json:"nodeName"`
-	Command       string     `json:"command"`
-	Payload       string     `json:"payload"`
-	Status        string     `json:"status"`
-	Result        string     `json:"result"`
-	RetryCount    int        `json:"retryCount"`
-	MaxRetries    int        `json:"maxRetries"`
-	TimeoutSecs   int        `json:"timeoutSecs"`
-	Priority      int        `json:"priority"`
-	CreatedAt     time.Time  `json:"createdAt"`
-	Dispatched    *time.Time `json:"dispatchedAt,omitempty"`
-	DoneAt        *time.Time `json:"doneAt,omitempty"`
+	ID          int64      `json:"id"`
+	NodeUID     string     `json:"nodeUid"`
+	NodeName    string     `json:"nodeName"`
+	Command     string     `json:"command"`
+	Payload     string     `json:"payload"`
+	Status      string     `json:"status"`
+	Result      string     `json:"result"`
+	RetryCount  int        `json:"retryCount"`
+	MaxRetries  int        `json:"maxRetries"`
+	TimeoutSecs int        `json:"timeoutSecs"`
+	Priority    int        `json:"priority"`
+	CreatedAt   time.Time  `json:"createdAt"`
+	Dispatched  *time.Time `json:"dispatchedAt,omitempty"`
+	DoneAt      *time.Time `json:"doneAt,omitempty"`
 }
 
 type Tunnel struct {
@@ -168,19 +170,73 @@ type ChainHop struct {
 	Protocol   string `json:"protocol"`
 }
 
-var upgrader = websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
-
 func writeJSON(w http.ResponseWriter, code int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
 	_ = json.NewEncoder(w).Encode(v)
 }
 
-func withCORS(next http.Handler) http.Handler {
+func requireEnv(key string) (string, error) {
+	v := strings.TrimSpace(os.Getenv(key))
+	if v == "" {
+		return "", fmt.Errorf("%s is required", key)
+	}
+	return v, nil
+}
+
+func normalizeOrigin(origin string) string {
+	return strings.TrimRight(strings.TrimSpace(origin), "/")
+}
+
+func parseAllowedOrigins(raw string) map[string]struct{} {
+	allowed := map[string]struct{}{}
+	for _, item := range strings.Split(raw, ",") {
+		origin := normalizeOrigin(item)
+		if origin != "" {
+			allowed[origin] = struct{}{}
+		}
+	}
+	return allowed
+}
+
+func requestScheme(r *http.Request) string {
+	if forwarded := strings.TrimSpace(r.Header.Get("X-Forwarded-Proto")); forwarded != "" {
+		return strings.ToLower(strings.TrimSpace(strings.Split(forwarded, ",")[0]))
+	}
+	if r.TLS != nil {
+		return "https"
+	}
+	return "http"
+}
+
+func (a *App) originAllowed(origin string, r *http.Request) bool {
+	origin = normalizeOrigin(origin)
+	if origin == "" {
+		return true
+	}
+	if _, ok := a.allowedOrigins[origin]; ok {
+		return true
+	}
+	return origin == fmt.Sprintf("%s://%s", requestScheme(r), r.Host)
+}
+
+func (a *App) withCORS(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
+		origin := normalizeOrigin(r.Header.Get("Origin"))
+		if origin != "" {
+			if !a.originAllowed(origin, r) {
+				if r.Method == http.MethodOptions {
+					w.WriteHeader(http.StatusForbidden)
+					return
+				}
+				writeJSON(w, http.StatusForbidden, map[string]string{"error": "origin not allowed"})
+				return
+			}
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+			w.Header().Set("Vary", "Origin")
+		}
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
-		w.Header().Set("Access-Control-Allow-Methods", "GET,POST,PATCH,OPTIONS")
+		w.Header().Set("Access-Control-Allow-Methods", "GET,POST,PATCH,DELETE,OPTIONS")
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
 			return
@@ -201,6 +257,27 @@ func firstNonEmpty(values ...string) string {
 	for _, v := range values {
 		if strings.TrimSpace(v) != "" {
 			return strings.TrimSpace(v)
+		}
+	}
+	return ""
+}
+
+func bearerToken(header string) string {
+	header = strings.TrimSpace(header)
+	if !strings.HasPrefix(strings.ToLower(header), "bearer ") {
+		return ""
+	}
+	return strings.TrimSpace(header[7:])
+}
+
+func websocketToken(r *http.Request) string {
+	if token := bearerToken(r.Header.Get("Authorization")); token != "" {
+		return token
+	}
+	for _, protocol := range websocket.Subprotocols(r) {
+		candidate := strings.TrimSpace(protocol)
+		if candidate != "" && candidate != wsProtocol {
+			return candidate
 		}
 	}
 	return ""
@@ -330,14 +407,34 @@ CREATE TABLE IF NOT EXISTS settings (
 	_, _ = a.db.ExecContext(ctx, `ALTER TABLE agent_tasks ADD COLUMN IF NOT EXISTS max_retries INT NOT NULL DEFAULT 3`)
 	_, _ = a.db.ExecContext(ctx, `ALTER TABLE agent_tasks ADD COLUMN IF NOT EXISTS timeout_seconds INT NOT NULL DEFAULT 300`)
 	_, _ = a.db.ExecContext(ctx, `ALTER TABLE agent_tasks ADD COLUMN IF NOT EXISTS priority INT NOT NULL DEFAULT 50`)
+	indexes := []string{
+		`CREATE INDEX IF NOT EXISTS idx_agent_tasks_status_node_uid_priority ON agent_tasks (status, node_uid, priority DESC, id ASC)`,
+		`CREATE INDEX IF NOT EXISTS idx_agent_tasks_status_node_name_priority ON agent_tasks (status, node_name, priority DESC, id ASC)`,
+		`CREATE INDEX IF NOT EXISTS idx_agent_tasks_status_dispatched_at ON agent_tasks (status, dispatched_at)`,
+		`CREATE INDEX IF NOT EXISTS idx_agent_heartbeats_node_name_created_at ON agent_heartbeats (node_name, created_at DESC)`,
+		`CREATE INDEX IF NOT EXISTS idx_agent_heartbeats_created_at ON agent_heartbeats (created_at DESC)`,
+		`CREATE INDEX IF NOT EXISTS idx_audit_logs_created_at ON audit_logs (created_at DESC)`,
+		`CREATE INDEX IF NOT EXISTS idx_alerts_read_created_at ON alerts (read, created_at DESC)`,
+	}
+	for _, stmt := range indexes {
+		if _, err := a.db.ExecContext(ctx, stmt); err != nil {
+			return err
+		}
+	}
+	if _, err := a.db.ExecContext(ctx, `UPDATE agent_tasks SET status='done' WHERE status='success'`); err != nil {
+		return err
+	}
 	return a.seed(ctx)
 }
 
 func (a *App) seed(ctx context.Context) error {
-	adminUser := mustEnv("ADMIN_USER", "admin")
-	adminPass := mustEnv("ADMIN_PASSWORD", "admin123")
+	adminUser := firstNonEmpty(os.Getenv("ADMIN_USER"), "admin")
+	adminPass, err := requireEnv("ADMIN_PASSWORD")
+	if err != nil {
+		return err
+	}
 	hash, _ := bcrypt.GenerateFromPassword([]byte(adminPass), bcrypt.DefaultCost)
-	_, err := a.db.ExecContext(ctx, `INSERT INTO users(username,password_hash,role)
+	_, err = a.db.ExecContext(ctx, `INSERT INTO users(username,password_hash,role)
 VALUES($1,$2,'admin') ON CONFLICT (username) DO NOTHING`, adminUser, string(hash))
 	if err != nil {
 		return err
@@ -379,25 +476,33 @@ func (a *App) makeToken(uid int64, role string) (string, error) {
 	return t.SignedString(a.jwtSecret)
 }
 
+func (a *App) parseUserToken(token string) (*Claims, error) {
+	if token == "" {
+		return nil, errors.New("missing bearer token")
+	}
+	parsed, err := jwt.ParseWithClaims(token, &Claims{}, func(candidate *jwt.Token) (any, error) {
+		if _, ok := candidate.Method.(*jwt.SigningMethodHMAC); !ok {
+			return nil, errors.New("bad signing method")
+		}
+		return a.jwtSecret, nil
+	})
+	if err != nil || !parsed.Valid {
+		return nil, errors.New("invalid token")
+	}
+	claims, ok := parsed.Claims.(*Claims)
+	if !ok {
+		return nil, errors.New("invalid token claims")
+	}
+	return claims, nil
+}
+
 func (a *App) auth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		h := r.Header.Get("Authorization")
-		if !strings.HasPrefix(strings.ToLower(h), "bearer ") {
-			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "missing bearer token"})
+		claims, err := a.parseUserToken(bearerToken(r.Header.Get("Authorization")))
+		if err != nil {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": err.Error()})
 			return
 		}
-		tok := strings.TrimSpace(h[7:])
-		parsed, err := jwt.ParseWithClaims(tok, &Claims{}, func(token *jwt.Token) (any, error) {
-			if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
-				return nil, errors.New("bad signing method")
-			}
-			return a.jwtSecret, nil
-		})
-		if err != nil || !parsed.Valid {
-			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid token"})
-			return
-		}
-		claims := parsed.Claims.(*Claims)
 		if claims.Role == "viewer" && (r.Method == http.MethodPost || r.Method == http.MethodPatch || r.Method == http.MethodDelete) {
 			writeJSON(w, http.StatusForbidden, map[string]string{"error": "viewer is read-only"})
 			return
@@ -444,13 +549,22 @@ func (a *App) audit(ctx context.Context, action, target, detail string) {
 }
 
 func (a *App) inSilentWindow(now time.Time) bool {
-	if strings.TrimSpace(a.alertSilentHours) == "" { return false }
+	if strings.TrimSpace(a.alertSilentHours) == "" {
+		return false
+	}
 	parts := strings.Split(a.alertSilentHours, "-")
-	if len(parts) != 2 { return false }
-	start, e1 := strconv.Atoi(parts[0]); end, e2 := strconv.Atoi(parts[1])
-	if e1 != nil || e2 != nil || start < 0 || start > 23 || end < 0 || end > 23 { return false }
+	if len(parts) != 2 {
+		return false
+	}
+	start, e1 := strconv.Atoi(parts[0])
+	end, e2 := strconv.Atoi(parts[1])
+	if e1 != nil || e2 != nil || start < 0 || start > 23 || end < 0 || end > 23 {
+		return false
+	}
 	h := now.Hour()
-	if start <= end { return h >= start && h < end }
+	if start <= end {
+		return h >= start && h < end
+	}
 	return h >= start || h < end
 }
 
@@ -511,9 +625,16 @@ func first(v, fallback string) string {
 func main() {
 	rand.Seed(time.Now().UnixNano())
 	dsn := mustEnv("DB_DSN", "postgres://gpanel:gpanel@127.0.0.1:5432/gpanel?sslmode=disable")
-	jwtSecret := mustEnv("JWT_SECRET", "dev-secret")
-	agentToken := mustEnv("AGENT_TOKEN", "dev-agent-token")
+	jwtSecret, err := requireEnv("JWT_SECRET")
+	if err != nil {
+		log.Fatal(err)
+	}
+	agentToken, err := requireEnv("AGENT_TOKEN")
+	if err != nil {
+		log.Fatal(err)
+	}
 	port := mustEnv("PORT", "8080")
+	allowedOrigins := parseAllowedOrigins(os.Getenv("ALLOWED_ORIGINS"))
 	webhookURL := strings.TrimSpace(os.Getenv("WEBHOOK_URL"))
 	offlineMinutes, _ := strconv.Atoi(mustEnv("ALERT_OFFLINE_MINUTES", "2"))
 	alertDedupeMins, _ := strconv.Atoi(mustEnv("ALERT_DEDUPE_MINUTES", "5"))
@@ -531,7 +652,7 @@ func main() {
 		log.Fatal(err)
 	}
 
-	app := &App{db: db, jwtSecret: []byte(jwtSecret), agentToken: agentToken, webhookURL: webhookURL, offlineMinutes: offlineMinutes, alertDedupeMins: alertDedupeMins, taskTimeoutSecs: taskTimeoutSecs, taskMaxRetries: taskMaxRetries, taskDispatchPerNode: taskDispatchPerNode, alertSilentHours: alertSilentHours}
+	app := &App{db: db, jwtSecret: []byte(jwtSecret), agentToken: agentToken, webhookURL: webhookURL, allowedOrigins: allowedOrigins, offlineMinutes: offlineMinutes, alertDedupeMins: alertDedupeMins, taskTimeoutSecs: taskTimeoutSecs, taskMaxRetries: taskMaxRetries, taskDispatchPerNode: taskDispatchPerNode, alertSilentHours: alertSilentHours}
 	ctx := context.Background()
 	if err := app.initSchema(ctx); err != nil {
 		log.Fatal(err)
@@ -674,15 +795,20 @@ ORDER BY priority DESC, id LIMIT 1 FOR UPDATE SKIP LOCKED`
 			writeJSON(w, 400, map[string]string{"error": "invalid payload"})
 			return
 		}
-		if req.Status != "success" && req.Status != "failed" {
-			writeJSON(w, 400, map[string]string{"error": "status must be success|failed"})
+		storedStatus := req.Status
+		switch req.Status {
+		case "success", "done":
+			storedStatus = "done"
+		case "failed":
+		default:
+			writeJSON(w, 400, map[string]string{"error": "status must be done|success|failed"})
 			return
 		}
 		if req.Result != "" && !json.Valid([]byte(req.Result)) {
 			writeJSON(w, 400, map[string]string{"error": "result must be valid JSON string"})
 			return
 		}
-		_, _ = app.db.Exec(`UPDATE agent_tasks SET status=$2,result=$3,done_at=now() WHERE id=$1`, id, req.Status, req.Result)
+		_, _ = app.db.Exec(`UPDATE agent_tasks SET status=$2,result=$3,done_at=now() WHERE id=$1`, id, storedStatus, req.Result)
 		writeJSON(w, 200, map[string]any{"ok": true})
 	})))
 
@@ -860,19 +986,19 @@ ORDER BY priority DESC, id LIMIT 1 FOR UPDATE SKIP LOCKED`
 		}
 
 		var pending, running, done, failed int
-		_ = app.db.QueryRow(`SELECT COUNT(*) FILTER (WHERE status='pending'), COUNT(*) FILTER (WHERE status='running'), COUNT(*) FILTER (WHERE status='done'), COUNT(*) FILTER (WHERE status='failed') FROM agent_tasks`).Scan(&pending, &running, &done, &failed)
+		_ = app.db.QueryRow(`SELECT COUNT(*) FILTER (WHERE status='pending'), COUNT(*) FILTER (WHERE status='dispatched'), COUNT(*) FILTER (WHERE status IN ('done','success')), COUNT(*) FILTER (WHERE status='failed') FROM agent_tasks`).Scan(&pending, &running, &done, &failed)
 		forwardStates := []map[string]any{}
 		for _, f := range forwards {
 			nodeName := nodeNameByID[f.NodeID]
 			serviceName := fmt.Sprintf("gost-%s.service", f.Name)
 			actualRunning := serviceStateByNode[nodeName][serviceName]
 			forwardStates = append(forwardStates, map[string]any{
-				"id": f.ID,
-				"name": f.Name,
-				"nodeId": f.NodeID,
-				"nodeName": nodeName,
+				"id":            f.ID,
+				"name":          f.Name,
+				"nodeId":        f.NodeID,
+				"nodeName":      nodeName,
 				"desiredStatus": f.Status,
-				"serviceName": serviceName,
+				"serviceName":   serviceName,
 				"actualRunning": actualRunning,
 			})
 		}
@@ -883,13 +1009,13 @@ ORDER BY priority DESC, id LIMIT 1 FOR UPDATE SKIP LOCKED`
 			serviceName := fmt.Sprintf("gost-%s.service", t.Name)
 			actualRunning := serviceStateByNode[nodeName][serviceName]
 			tunnelStates = append(tunnelStates, map[string]any{
-				"id": t.ID,
-				"name": t.Name,
-				"nodeId": t.NodeID,
-				"nodeName": nodeName,
+				"id":             t.ID,
+				"name":           t.Name,
+				"nodeId":         t.NodeID,
+				"nodeName":       nodeName,
 				"desiredEnabled": t.Enabled,
-				"serviceName": serviceName,
-				"actualRunning": actualRunning,
+				"serviceName":    serviceName,
+				"actualRunning":  actualRunning,
 			})
 		}
 
@@ -925,25 +1051,25 @@ ORDER BY priority DESC, id LIMIT 1 FOR UPDATE SKIP LOCKED`
 				_ = app.db.QueryRow(`SELECT COUNT(*) FROM agent_tasks WHERE node_name=$1 AND status='pending' AND command IN ('gost.apply_forward','gost.apply_tunnel') AND payload LIKE $2`, nodeName, "%\"name\":\""+c.Name+"-hop-%").Scan(&hopPending)
 				pendingTasks += hopPending
 				hopStates = append(hopStates, map[string]any{
-					"index": i + 1,
-					"nodeName": nodeName,
-					"serviceName": serviceName,
+					"index":         i + 1,
+					"nodeName":      nodeName,
+					"serviceName":   serviceName,
 					"actualRunning": running,
-					"nodeOnline": nodeOnline,
+					"nodeOnline":    nodeOnline,
 				})
 			}
 			readyHops := len(hopStates) - offlineHops
 			chainStates = append(chainStates, map[string]any{
-				"id": c.ID,
-				"name": c.Name,
-				"enabled": c.Enabled,
-				"description": c.Description,
-				"allRunning": allRunning,
-				"offlineHops": offlineHops,
-				"readyHops": readyHops,
-				"totalHops": len(hopStates),
+				"id":           c.ID,
+				"name":         c.Name,
+				"enabled":      c.Enabled,
+				"description":  c.Description,
+				"allRunning":   allRunning,
+				"offlineHops":  offlineHops,
+				"readyHops":    readyHops,
+				"totalHops":    len(hopStates),
 				"pendingTasks": pendingTasks,
-				"hops": hopStates,
+				"hops":         hopStates,
 			})
 		}
 
@@ -963,10 +1089,19 @@ ORDER BY priority DESC, id LIMIT 1 FOR UPDATE SKIP LOCKED`
 			}
 			writeJSON(w, 200, out)
 		case http.MethodPost:
-			var req struct { Name, Mode, Listen string; NodeID int64 }
-			if json.NewDecoder(r.Body).Decode(&req) != nil || req.Name == "" || req.Mode == "" || req.Listen == "" || req.NodeID <= 0 { writeJSON(w, 400, map[string]string{"error": "invalid payload"}); return }
+			var req struct {
+				Name, Mode, Listen string
+				NodeID             int64
+			}
+			if json.NewDecoder(r.Body).Decode(&req) != nil || req.Name == "" || req.Mode == "" || req.Listen == "" || req.NodeID <= 0 {
+				writeJSON(w, 400, map[string]string{"error": "invalid payload"})
+				return
+			}
 			_, err := app.db.Exec(`INSERT INTO tunnels(name,mode,listen,node_id,enabled,description) VALUES($1,$2,$3,$4,true,'')`, req.Name, req.Mode, req.Listen, req.NodeID)
-			if err != nil { writeJSON(w, 500, map[string]string{"error": err.Error()}); return }
+			if err != nil {
+				writeJSON(w, 500, map[string]string{"error": err.Error()})
+				return
+			}
 			nodeName, err := mustNodeName(req.NodeID)
 			if err == nil {
 				_ = scheduleTunnel(nodeName, req.Name, req.Mode, req.Listen)
@@ -992,27 +1127,46 @@ ORDER BY priority DESC, id LIMIT 1 FOR UPDATE SKIP LOCKED`
 		action := parts[3]
 		switch {
 		case action == "update" && r.Method == http.MethodPatch:
-			var req struct { Name, Mode, Listen string; NodeID int64 }
-			if json.NewDecoder(r.Body).Decode(&req) != nil { writeJSON(w, 400, map[string]string{"error": "invalid payload"}); return }
+			var req struct {
+				Name, Mode, Listen string
+				NodeID             int64
+			}
+			if json.NewDecoder(r.Body).Decode(&req) != nil {
+				writeJSON(w, 400, map[string]string{"error": "invalid payload"})
+				return
+			}
 			_, err := app.db.Exec(`UPDATE tunnels SET name=COALESCE(NULLIF($2,''),name), mode=COALESCE(NULLIF($3,''),mode), listen=COALESCE(NULLIF($4,''),listen), node_id=COALESCE(NULLIF($5,0),node_id), description='updated' WHERE id=$1`, id, req.Name, req.Mode, req.Listen, req.NodeID)
-			if err != nil { writeJSON(w, 500, map[string]string{"error": err.Error()}); return }
+			if err != nil {
+				writeJSON(w, 500, map[string]string{"error": err.Error()})
+				return
+			}
 			app.audit(r.Context(), "tunnel.update", fmt.Sprintf("tunnel/%d", id), "updated")
 			writeJSON(w, 200, map[string]any{"ok": true})
 		case action == "delete" && r.Method == http.MethodDelete:
 			res, _ := app.db.Exec(`DELETE FROM tunnels WHERE id=$1`, id)
 			aff, _ := res.RowsAffected()
-			if aff == 0 { writeJSON(w, 404, map[string]string{"error": "tunnel not found"}); return }
+			if aff == 0 {
+				writeJSON(w, 404, map[string]string{"error": "tunnel not found"})
+				return
+			}
 			app.audit(r.Context(), "tunnel.delete", fmt.Sprintf("tunnel/%d", id), "deleted")
 			writeJSON(w, 200, map[string]any{"ok": true})
 		case action == "toggle" && r.Method == http.MethodPatch:
 			var t Tunnel
 			err := app.db.QueryRow(`SELECT id,name,mode,listen,node_id,enabled,description,created_at FROM tunnels WHERE id=$1`, id).Scan(&t.ID, &t.Name, &t.Mode, &t.Listen, &t.NodeID, &t.Enabled, &t.Description, &t.CreatedAt)
-			if err != nil { writeJSON(w, 404, map[string]string{"error": "tunnel not found"}); return }
+			if err != nil {
+				writeJSON(w, 404, map[string]string{"error": "tunnel not found"})
+				return
+			}
 			enabled := !t.Enabled
-			_, _ = app.db.Exec(`UPDATE tunnels SET enabled=$2, description=$3 WHERE id=$1`, id, enabled, map[bool]string{true:"enabled", false:"disabled"}[enabled])
+			_, _ = app.db.Exec(`UPDATE tunnels SET enabled=$2, description=$3 WHERE id=$1`, id, enabled, map[bool]string{true: "enabled", false: "disabled"}[enabled])
 			nodeName, err := mustNodeName(t.NodeID)
 			if err == nil {
-				if enabled { _ = createNodeTask(nodeName, "gost.start", map[string]any{"name": t.Name}) } else { _ = createNodeTask(nodeName, "gost.stop", map[string]any{"name": t.Name}) }
+				if enabled {
+					_ = createNodeTask(nodeName, "gost.start", map[string]any{"name": t.Name})
+				} else {
+					_ = createNodeTask(nodeName, "gost.stop", map[string]any{"name": t.Name})
+				}
 			}
 			app.audit(r.Context(), "tunnel.toggle", fmt.Sprintf("tunnel/%d", id), fmt.Sprintf("enabled=%v", enabled))
 			writeJSON(w, 200, map[string]any{"ok": true, "enabled": enabled})
@@ -1108,7 +1262,10 @@ ORDER BY priority DESC, id LIMIT 1 FOR UPDATE SKIP LOCKED`
 				description = err.Error()
 			}
 			_, err := app.db.Exec(`INSERT INTO chains(name,path,protocol,enabled,description) VALUES($1,$2,$3,$4,$5)`, req.Name, req.Path, req.Protocol, enabled, description)
-			if err != nil { writeJSON(w, 500, map[string]string{"error": err.Error()}); return }
+			if err != nil {
+				writeJSON(w, 500, map[string]string{"error": err.Error()})
+				return
+			}
 			app.audit(r.Context(), "chain.create", fmt.Sprintf("chain/%s", req.Name), description)
 			writeJSON(w, 201, map[string]any{"ok": true, "enabled": enabled, "description": description, "path": req.Path, "protocol": req.Protocol})
 		default:
@@ -1130,22 +1287,34 @@ ORDER BY priority DESC, id LIMIT 1 FOR UPDATE SKIP LOCKED`
 		action := parts[3]
 		switch {
 		case action == "update" && r.Method == http.MethodPatch:
-			var req struct { Name, Path, Protocol string }
-			if json.NewDecoder(r.Body).Decode(&req) != nil { writeJSON(w, 400, map[string]string{"error": "invalid payload"}); return }
+			var req struct{ Name, Path, Protocol string }
+			if json.NewDecoder(r.Body).Decode(&req) != nil {
+				writeJSON(w, 400, map[string]string{"error": "invalid payload"})
+				return
+			}
 			_, err := app.db.Exec(`UPDATE chains SET name=COALESCE(NULLIF($2,''),name), path=COALESCE(NULLIF($3,''),path), protocol=COALESCE(NULLIF($4,''),protocol), description='updated', enabled=false WHERE id=$1`, id, req.Name, req.Path, req.Protocol)
-			if err != nil { writeJSON(w, 500, map[string]string{"error": err.Error()}); return }
+			if err != nil {
+				writeJSON(w, 500, map[string]string{"error": err.Error()})
+				return
+			}
 			app.audit(r.Context(), "chain.update", fmt.Sprintf("chain/%d", id), "updated")
 			writeJSON(w, 200, map[string]any{"ok": true})
 		case action == "delete" && r.Method == http.MethodDelete:
 			res, _ := app.db.Exec(`DELETE FROM chains WHERE id=$1`, id)
 			aff, _ := res.RowsAffected()
-			if aff == 0 { writeJSON(w, 404, map[string]string{"error": "chain not found"}); return }
+			if aff == 0 {
+				writeJSON(w, 404, map[string]string{"error": "chain not found"})
+				return
+			}
 			app.audit(r.Context(), "chain.delete", fmt.Sprintf("chain/%d", id), "deleted")
 			writeJSON(w, 200, map[string]any{"ok": true})
 		case action == "toggle" && r.Method == http.MethodPatch:
 			var chain Chain
 			err := app.db.QueryRow(`SELECT id,name,path,protocol,enabled,description,created_at FROM chains WHERE id=$1`, id).Scan(&chain.ID, &chain.Name, &chain.Path, &chain.Protocol, &chain.Enabled, &chain.Description, &chain.CreatedAt)
-			if err != nil { writeJSON(w, 404, map[string]string{"error": "chain not found"}); return }
+			if err != nil {
+				writeJSON(w, 404, map[string]string{"error": "chain not found"})
+				return
+			}
 			enabled := !chain.Enabled
 			description := chain.Description
 			if enabled {
@@ -1181,12 +1350,30 @@ ORDER BY priority DESC, id LIMIT 1 FOR UPDATE SKIP LOCKED`
 				writeJSON(w, 400, map[string]string{"error": "invalid payload"})
 				return
 			}
-			if req.OfflineMinutes > 0 { app.offlineMinutes = req.OfflineMinutes; _, _ = app.db.Exec(`UPDATE settings SET value=$2,updated_at=now() WHERE key=$1`, "alert.offline_minutes", strconv.Itoa(req.OfflineMinutes)) }
-			if req.DedupeMinutes > 0 { app.alertDedupeMins = req.DedupeMinutes; _, _ = app.db.Exec(`UPDATE settings SET value=$2,updated_at=now() WHERE key=$1`, "alert.dedupe_minutes", strconv.Itoa(req.DedupeMinutes)) }
-			if req.TaskTimeoutSecs > 0 { app.taskTimeoutSecs = req.TaskTimeoutSecs; _, _ = app.db.Exec(`UPDATE settings SET value=$2,updated_at=now() WHERE key=$1`, "task.timeout_seconds", strconv.Itoa(req.TaskTimeoutSecs)) }
-			if req.TaskMaxRetries >= 0 { app.taskMaxRetries = req.TaskMaxRetries; _, _ = app.db.Exec(`UPDATE settings SET value=$2,updated_at=now() WHERE key=$1`, "task.max_retries", strconv.Itoa(req.TaskMaxRetries)) }
-			if req.TaskDispatchPerNode > 0 { app.taskDispatchPerNode = req.TaskDispatchPerNode; _, _ = app.db.Exec(`UPDATE settings SET value=$2,updated_at=now() WHERE key=$1`, "task.dispatch_per_node", strconv.Itoa(req.TaskDispatchPerNode)) }
-			if strings.TrimSpace(req.AlertSilentHours) != "" { app.alertSilentHours = req.AlertSilentHours; _, _ = app.db.Exec(`UPDATE settings SET value=$2,updated_at=now() WHERE key=$1`, "alert.silent_hours", req.AlertSilentHours) }
+			if req.OfflineMinutes > 0 {
+				app.offlineMinutes = req.OfflineMinutes
+				_, _ = app.db.Exec(`UPDATE settings SET value=$2,updated_at=now() WHERE key=$1`, "alert.offline_minutes", strconv.Itoa(req.OfflineMinutes))
+			}
+			if req.DedupeMinutes > 0 {
+				app.alertDedupeMins = req.DedupeMinutes
+				_, _ = app.db.Exec(`UPDATE settings SET value=$2,updated_at=now() WHERE key=$1`, "alert.dedupe_minutes", strconv.Itoa(req.DedupeMinutes))
+			}
+			if req.TaskTimeoutSecs > 0 {
+				app.taskTimeoutSecs = req.TaskTimeoutSecs
+				_, _ = app.db.Exec(`UPDATE settings SET value=$2,updated_at=now() WHERE key=$1`, "task.timeout_seconds", strconv.Itoa(req.TaskTimeoutSecs))
+			}
+			if req.TaskMaxRetries >= 0 {
+				app.taskMaxRetries = req.TaskMaxRetries
+				_, _ = app.db.Exec(`UPDATE settings SET value=$2,updated_at=now() WHERE key=$1`, "task.max_retries", strconv.Itoa(req.TaskMaxRetries))
+			}
+			if req.TaskDispatchPerNode > 0 {
+				app.taskDispatchPerNode = req.TaskDispatchPerNode
+				_, _ = app.db.Exec(`UPDATE settings SET value=$2,updated_at=now() WHERE key=$1`, "task.dispatch_per_node", strconv.Itoa(req.TaskDispatchPerNode))
+			}
+			if strings.TrimSpace(req.AlertSilentHours) != "" {
+				app.alertSilentHours = req.AlertSilentHours
+				_, _ = app.db.Exec(`UPDATE settings SET value=$2,updated_at=now() WHERE key=$1`, "alert.silent_hours", req.AlertSilentHours)
+			}
 			app.audit(r.Context(), "settings.alerts.update", "settings/alerts", "updated")
 			writeJSON(w, 200, map[string]any{"offlineMinutes": app.offlineMinutes, "dedupeMinutes": app.alertDedupeMins, "taskTimeoutSeconds": app.taskTimeoutSecs, "taskMaxRetries": app.taskMaxRetries, "taskDispatchPerNode": app.taskDispatchPerNode, "alertSilentHours": app.alertSilentHours})
 		default:
@@ -1305,13 +1492,13 @@ ORDER BY priority DESC, id LIMIT 1 FOR UPDATE SKIP LOCKED`
 			writeJSON(w, 200, out)
 		case http.MethodPost:
 			var req struct {
-				NodeUID      string `json:"nodeUid"`
-				NodeName     string `json:"nodeName"`
-				Command      string `json:"command"`
-				Payload      string `json:"payload"`
-				MaxRetries   int    `json:"maxRetries"`
-				TimeoutSecs  int    `json:"timeoutSecs"`
-				Priority     int    `json:"priority"`
+				NodeUID     string `json:"nodeUid"`
+				NodeName    string `json:"nodeName"`
+				Command     string `json:"command"`
+				Payload     string `json:"payload"`
+				MaxRetries  int    `json:"maxRetries"`
+				TimeoutSecs int    `json:"timeoutSecs"`
+				Priority    int    `json:"priority"`
 			}
 			if json.NewDecoder(r.Body).Decode(&req) != nil || req.Command == "" {
 				writeJSON(w, 400, map[string]string{"error": "invalid payload"})
@@ -1321,9 +1508,15 @@ ORDER BY priority DESC, id LIMIT 1 FOR UPDATE SKIP LOCKED`
 				writeJSON(w, 400, map[string]string{"error": "payload must be valid JSON string"})
 				return
 			}
-			if req.MaxRetries <= 0 { req.MaxRetries = app.taskMaxRetries }
-			if req.TimeoutSecs <= 0 { req.TimeoutSecs = app.taskTimeoutSecs }
-			if req.Priority == 0 { req.Priority = 50 }
+			if req.MaxRetries <= 0 {
+				req.MaxRetries = app.taskMaxRetries
+			}
+			if req.TimeoutSecs <= 0 {
+				req.TimeoutSecs = app.taskTimeoutSecs
+			}
+			if req.Priority == 0 {
+				req.Priority = 50
+			}
 			var t AgentTask
 			err := app.db.QueryRow(`INSERT INTO agent_tasks(node_uid,node_name,command,payload,status,retry_count,max_retries,timeout_seconds,priority) VALUES($1,$2,$3,$4,'pending',0,$5,$6,$7) RETURNING id,node_uid,node_name,command,payload,status,result,retry_count,max_retries,timeout_seconds,priority,created_at,dispatched_at,done_at`, req.NodeUID, req.NodeName, req.Command, req.Payload, req.MaxRetries, req.TimeoutSecs, req.Priority).
 				Scan(&t.ID, &t.NodeUID, &t.NodeName, &t.Command, &t.Payload, &t.Status, &t.Result, &t.RetryCount, &t.MaxRetries, &t.TimeoutSecs, &t.Priority, &t.CreatedAt, &t.Dispatched, &t.DoneAt)
@@ -1472,10 +1665,10 @@ ORDER BY priority DESC, id LIMIT 1 FOR UPDATE SKIP LOCKED`
 		if len(parts) == 5 && parts[3] == "gost" && r.Method == http.MethodPost {
 			action := parts[4]
 			var req struct {
-				Name   string `json:"name"`
-				Mode   string `json:"mode"`
-				Listen string `json:"listen"`
-				Target string `json:"target"`
+				Name     string `json:"name"`
+				Mode     string `json:"mode"`
+				Listen   string `json:"listen"`
+				Target   string `json:"target"`
 				Protocol string `json:"protocol"`
 			}
 			_ = json.NewDecoder(r.Body).Decode(&req)
@@ -1488,18 +1681,27 @@ ORDER BY priority DESC, id LIMIT 1 FOR UPDATE SKIP LOCKED`
 			var cmd string
 			payload := map[string]any{"name": req.Name, "mode": req.Mode, "listen": req.Listen, "target": req.Target, "protocol": req.Protocol}
 			switch action {
-			case "install": cmd = "gost.install"
-			case "start": cmd = "gost.start"
-			case "stop": cmd = "gost.stop"
-			case "restart": cmd = "gost.restart"
-			case "status": cmd = "gost.status"
-			case "apply-forward": cmd = "gost.apply_forward"
-			case "apply-tunnel": cmd = "gost.apply_tunnel"
+			case "install":
+				cmd = "gost.install"
+			case "start":
+				cmd = "gost.start"
+			case "stop":
+				cmd = "gost.stop"
+			case "restart":
+				cmd = "gost.restart"
+			case "status":
+				cmd = "gost.status"
+			case "apply-forward":
+				cmd = "gost.apply_forward"
+			case "apply-tunnel":
+				cmd = "gost.apply_tunnel"
 			default:
 				writeJSON(w, 400, map[string]string{"error": "unsupported gost action"})
 				return
 			}
-			if req.Name == "" { payload["name"] = fmt.Sprintf("node-%d", id) }
+			if req.Name == "" {
+				payload["name"] = fmt.Sprintf("node-%d", id)
+			}
 			if err := createNodeTask(nodeName, cmd, payload); err != nil {
 				writeJSON(w, 500, map[string]string{"error": err.Error()})
 				return
@@ -1525,7 +1727,10 @@ ORDER BY priority DESC, id LIMIT 1 FOR UPDATE SKIP LOCKED`
 			}
 			writeJSON(w, 200, out)
 		case http.MethodPost:
-			var req struct{ Name, Protocol string; NodeID int64 }
+			var req struct {
+				Name, Protocol string
+				NodeID         int64
+			}
 			if json.NewDecoder(r.Body).Decode(&req) != nil || req.Name == "" || req.Protocol == "" || req.NodeID <= 0 {
 				writeJSON(w, 400, map[string]string{"error": "invalid payload"})
 				return
@@ -1576,7 +1781,10 @@ ORDER BY priority DESC, id LIMIT 1 FOR UPDATE SKIP LOCKED`
 			}
 			writeJSON(w, 200, out)
 		case http.MethodPost:
-			var req struct{ Name, ListenAddr, TargetAddr, Protocol string; NodeID int64 }
+			var req struct {
+				Name, ListenAddr, TargetAddr, Protocol string
+				NodeID                                 int64
+			}
 			if json.NewDecoder(r.Body).Decode(&req) != nil || req.Name == "" || req.ListenAddr == "" || req.TargetAddr == "" || req.Protocol == "" || req.NodeID <= 0 {
 				writeJSON(w, 400, map[string]string{"error": "invalid payload"})
 				return
@@ -1611,16 +1819,28 @@ ORDER BY priority DESC, id LIMIT 1 FOR UPDATE SKIP LOCKED`
 		action := parts[3]
 		switch {
 		case action == "update" && r.Method == http.MethodPatch:
-			var req struct{ Name, ListenAddr, TargetAddr, Protocol string; NodeID int64 }
-			if json.NewDecoder(r.Body).Decode(&req) != nil { writeJSON(w, 400, map[string]string{"error": "invalid payload"}); return }
+			var req struct {
+				Name, ListenAddr, TargetAddr, Protocol string
+				NodeID                                 int64
+			}
+			if json.NewDecoder(r.Body).Decode(&req) != nil {
+				writeJSON(w, 400, map[string]string{"error": "invalid payload"})
+				return
+			}
 			_, err := app.db.Exec(`UPDATE forwards SET name=COALESCE(NULLIF($2,''),name), listen_addr=COALESCE(NULLIF($3,''),listen_addr), target_addr=COALESCE(NULLIF($4,''),target_addr), protocol=COALESCE(NULLIF($5,''),protocol), node_id=COALESCE(NULLIF($6,0),node_id), updated_at=now() WHERE id=$1`, id, req.Name, req.ListenAddr, req.TargetAddr, req.Protocol, req.NodeID)
-			if err != nil { writeJSON(w, 500, map[string]string{"error": err.Error()}); return }
+			if err != nil {
+				writeJSON(w, 500, map[string]string{"error": err.Error()})
+				return
+			}
 			app.audit(r.Context(), "forward.update", fmt.Sprintf("forward/%d", id), "updated")
 			writeJSON(w, 200, map[string]any{"ok": true})
 		case action == "delete" && r.Method == http.MethodDelete:
 			res, _ := app.db.Exec(`DELETE FROM forwards WHERE id=$1`, id)
 			aff, _ := res.RowsAffected()
-			if aff == 0 { writeJSON(w, 404, map[string]string{"error": "forward not found"}); return }
+			if aff == 0 {
+				writeJSON(w, 404, map[string]string{"error": "forward not found"})
+				return
+			}
 			app.audit(r.Context(), "forward.delete", fmt.Sprintf("forward/%d", id), "deleted")
 			writeJSON(w, 200, map[string]any{"ok": true})
 		case action == "toggle" && r.Method == http.MethodPatch:
@@ -1633,7 +1853,11 @@ ORDER BY priority DESC, id LIMIT 1 FOR UPDATE SKIP LOCKED`
 			}
 			nodeName, err := mustNodeName(f.NodeID)
 			if err == nil {
-				if f.Status == "enabled" { _ = createNodeTask(nodeName, "gost.start", map[string]any{"name": f.Name}) } else { _ = createNodeTask(nodeName, "gost.stop", map[string]any{"name": f.Name}) }
+				if f.Status == "enabled" {
+					_ = createNodeTask(nodeName, "gost.start", map[string]any{"name": f.Name})
+				} else {
+					_ = createNodeTask(nodeName, "gost.stop", map[string]any{"name": f.Name})
+				}
 			}
 			app.audit(r.Context(), "forward.toggle", fmt.Sprintf("forward/%d", f.ID), f.Status)
 			writeJSON(w, 200, f)
@@ -1655,7 +1879,10 @@ ORDER BY priority DESC, id LIMIT 1 FOR UPDATE SKIP LOCKED`
 			}
 			writeJSON(w, 200, out)
 		case http.MethodPost:
-			var req struct{ Name, Action, Expr string; Priority int }
+			var req struct {
+				Name, Action, Expr string
+				Priority           int
+			}
 			if json.NewDecoder(r.Body).Decode(&req) != nil || req.Name == "" || req.Action == "" || req.Expr == "" {
 				writeJSON(w, 400, map[string]string{"error": "invalid payload"})
 				return
@@ -1730,6 +1957,20 @@ ORDER BY priority DESC, id LIMIT 1 FOR UPDATE SKIP LOCKED`
 	})
 
 	api.HandleFunc("/ws/metrics", func(w http.ResponseWriter, r *http.Request) {
+		if !app.originAllowed(r.Header.Get("Origin"), r) {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "origin not allowed"})
+			return
+		}
+		if _, err := app.parseUserToken(websocketToken(r)); err != nil {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": err.Error()})
+			return
+		}
+		upgrader := websocket.Upgrader{
+			CheckOrigin: func(req *http.Request) bool {
+				return app.originAllowed(req.Header.Get("Origin"), req)
+			},
+			Subprotocols: []string{wsProtocol},
+		}
 		conn, err := upgrader.Upgrade(w, r, nil)
 		if err != nil {
 			return
@@ -1758,7 +1999,7 @@ ORDER BY priority DESC, id LIMIT 1 FOR UPDATE SKIP LOCKED`
 
 	addr := ":" + port
 	log.Printf("gpanel backend listening on %s", addr)
-	if err := http.ListenAndServe(addr, withCORS(mux)); err != nil {
+	if err := http.ListenAndServe(addr, app.withCORS(mux)); err != nil {
 		log.Fatal(err)
 	}
 }

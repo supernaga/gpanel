@@ -4,7 +4,7 @@ services:
     environment:
       POSTGRES_DB: gpanel
       POSTGRES_USER: gpanel
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-gpanel}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD?POSTGRES_PASSWORD is required}
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -17,11 +17,12 @@ services:
     build: ./backend
     environment:
       PORT: 8080
-      DB_DSN: postgres://gpanel:${POSTGRES_PASSWORD:-gpanel}@postgres:5432/gpanel?sslmode=disable
-      JWT_SECRET: ${JWT_SECRET:-dev-secret}
-      AGENT_TOKEN: ${AGENT_TOKEN:-dev-agent-token}
+      DB_DSN: postgres://gpanel:${POSTGRES_PASSWORD?POSTGRES_PASSWORD is required}@postgres:5432/gpanel?sslmode=disable
+      JWT_SECRET: ${JWT_SECRET?JWT_SECRET is required}
+      AGENT_TOKEN: ${AGENT_TOKEN?AGENT_TOKEN is required}
       ADMIN_USER: ${ADMIN_USER:-admin}
-      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-admin123}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD?ADMIN_PASSWORD is required}
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-}
     ports:
       - "8080:8080"
     depends_on:

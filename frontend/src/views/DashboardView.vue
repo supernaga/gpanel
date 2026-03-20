@@ -20,7 +20,8 @@ let ws
 
 onMounted(async () => {
   summary.value = await api.summary()
-  ws = new WebSocket(api.wsUrl())
+  const { url, protocols } = api.wsConfig()
+  ws = new WebSocket(url, protocols)
   ws.onmessage = (e) => {
     summary.value = JSON.parse(e.data)
   }

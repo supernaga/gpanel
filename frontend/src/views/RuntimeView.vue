@@ -130,7 +130,7 @@
           <td>#{{ t.id }}</td>
           <td>{{ t.nodeName || t.nodeUid || '-' }}</td>
           <td>{{ t.command }}</td>
-          <td><span :class="['badge', t.status === 'done' ? 'online' : (t.status === 'failed' ? 'offline' : '')]">{{ t.status }}</span></td>
+          <td><span :class="['badge', taskStatusClass(t.status)]">{{ taskStatusLabel(t.status) }}</span></td>
           <td>{{ t.priority }}</td>
           <td>{{ formatTime(t.createdAt) }}</td>
         </tr>
@@ -152,6 +152,17 @@ const parseList = (value) => {
 const findForwardState = (id) => (details.value.forwardStates || []).find(item => item.id === id)
 const findTunnelState = (id) => (details.value.tunnelStates || []).find(item => item.id === id)
 const findChainState = (id) => (details.value.chainStates || []).find(item => item.id === id)
+const taskStatusLabel = (status) => {
+  if (status === 'dispatched') return 'running'
+  if (status === 'success') return 'done'
+  return status
+}
+const taskStatusClass = (status) => {
+  const normalized = taskStatusLabel(status)
+  if (normalized === 'done') return 'online'
+  if (normalized === 'failed') return 'offline'
+  return ''
+}
 const forwardMismatch = (forward) => {
   const state = findForwardState(forward.id)
   if (!state) return false

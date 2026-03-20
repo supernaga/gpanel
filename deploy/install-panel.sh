@@ -46,6 +46,7 @@ TASK_TIMEOUT_SECONDS="${TASK_TIMEOUT_SECONDS:-300}"
 TASK_MAX_RETRIES="${TASK_MAX_RETRIES:-3}"
 TASK_DISPATCH_PER_NODE="${TASK_DISPATCH_PER_NODE:-1}"
 ALERT_SILENT_HOURS="${ALERT_SILENT_HOURS:-}"
+ALLOWED_ORIGINS="${ALLOWED_ORIGINS:-}"
 IMAGE_PREFIX="${IMAGE_PREFIX:-ghcr.io/supernaga/gpanel}"
 PANEL_BUILD_MODE="${PANEL_BUILD_MODE:-auto}"
 
@@ -63,8 +64,10 @@ TASK_TIMEOUT_SECONDS=$TASK_TIMEOUT_SECONDS
 TASK_MAX_RETRIES=$TASK_MAX_RETRIES
 TASK_DISPATCH_PER_NODE=$TASK_DISPATCH_PER_NODE
 ALERT_SILENT_HOURS=$ALERT_SILENT_HOURS
+ALLOWED_ORIGINS=$ALLOWED_ORIGINS
 IMAGE_PREFIX=$IMAGE_PREFIX
 EOT
+chmod 600 deploy/.env
 }
 
 write_env
@@ -112,7 +115,6 @@ docker compose ps || true
 echo ""
 echo "[OK] Panel started: http://$IP"
 echo "[INFO] Secrets saved in: $APP_DIR/deploy/.env"
-echo "[INFO] Agent token: $AGENT_TOKEN"
 echo "[INFO] Admin user: $ADMIN_USER"
-echo "[INFO] Admin password: $ADMIN_PASSWORD"
+echo "[INFO] Credentials are stored in deploy/.env with mode 600"
 echo "[INFO] Recommended validation path: Nodes -> Forwards -> Tunnels -> Chains -> Runtime"

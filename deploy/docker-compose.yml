@@ -23,11 +23,12 @@ services:
       dockerfile: Dockerfile
     environment:
       PORT: 8080
-      DB_DSN: postgres://gpanel:${POSTGRES_PASSWORD}@postgres:5432/gpanel?sslmode=disable
-      JWT_SECRET: ${JWT_SECRET}
-      AGENT_TOKEN: ${AGENT_TOKEN}
+      DB_DSN: postgres://gpanel:${POSTGRES_PASSWORD?POSTGRES_PASSWORD is required}@postgres:5432/gpanel?sslmode=disable
+      JWT_SECRET: ${JWT_SECRET?JWT_SECRET is required}
+      AGENT_TOKEN: ${AGENT_TOKEN?AGENT_TOKEN is required}
       ADMIN_USER: ${ADMIN_USER}
-      ADMIN_PASSWORD: ${ADMIN_PASSWORD}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD?ADMIN_PASSWORD is required}
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-}
       WEBHOOK_URL: ${WEBHOOK_URL}
       ALERT_OFFLINE_MINUTES: ${ALERT_OFFLINE_MINUTES:-2}
       ALERT_DEDUPE_MINUTES: ${ALERT_DEDUPE_MINUTES:-5}
