@@ -2,16 +2,24 @@ package main
 
 import (
 	"context"
+	crand "crypto/rand"
+	"crypto/sha256"
+	"crypto/subtle"
 	"database/sql"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
-	"math/rand"
+	mrand "math/rand"
+	"net"
 	"net/http"
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
@@ -23,17 +31,24 @@ import (
 type ctxKey string
 
 const (
-	ctxUserID   ctxKey = "uid"
-	ctxUserRole ctxKey = "role"
-	wsProtocol  string = "gpanel.v1"
+	ctxUserID      ctxKey = "uid"
+	ctxUserRole    ctxKey = "role"
+	ctxAgentNodeID ctxKey = "agent_node_id"
+	ctxAgentNode   ctxKey = "agent_node"
+	wsProtocol     string = "gpanel.v1"
+
+	maxBodyBytes       int64 = 1 << 20
+	loginWindow              = 10 * time.Minute
+	loginBlockDuration       = 15 * time.Minute
+	loginMaxFailures         = 8
 )
 
 type App struct {
 	db                  *sql.DB
 	jwtSecret           []byte
-	agentToken          string
 	webhookURL          string
 	allowedOrigins      map[string]struct{}
+	loginLimiter        *LoginLimiter
 	offlineMinutes      int
 	alertDedupeMins     int
 	taskTimeoutSecs     int
@@ -57,13 +72,15 @@ type DashboardSummary struct {
 }
 
 type Node struct {
-	ID        int64     `json:"id"`
-	Name      string    `json:"name"`
-	Region    string    `json:"region"`
-	Status    string    `json:"status"`
-	LatencyMs int       `json:"latencyMs"`
-	Version   string    `json:"version"`
-	UpdatedAt time.Time `json:"updatedAt"`
+	ID            int64     `json:"id"`
+	Name          string    `json:"name"`
+	Region        string    `json:"region"`
+	Status        string    `json:"status"`
+	LatencyMs     int       `json:"latencyMs"`
+	Version       string    `json:"version"`
+	AgentUID      string    `json:"agentUid,omitempty"`
+	HasAgentToken bool      `json:"hasAgentToken"`
+	UpdatedAt     time.Time `json:"updatedAt"`
 }
 
 type Client struct {
@@ -170,10 +187,52 @@ type ChainHop struct {
 	Protocol   string `json:"protocol"`
 }
 
+type AgentNode struct {
+	ID             int64
+	Name           string
+	AgentUID       string
+	AgentTokenHash string
+}
+
+type LoginLimiter struct {
+	mu       sync.Mutex
+	attempts map[string]*loginAttempt
+}
+
+type loginAttempt struct {
+	Count      int
+	WindowFrom time.Time
+	BlockUntil time.Time
+}
+
 func writeJSON(w http.ResponseWriter, code int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
 	_ = json.NewEncoder(w).Encode(v)
+}
+
+func decodeJSON(w http.ResponseWriter, r *http.Request, dst any) error {
+	if r.Body == nil {
+		return errors.New("missing request body")
+	}
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(dst); err != nil {
+		return err
+	}
+	if err := dec.Decode(&struct{}{}); err != io.EOF {
+		return errors.New("request body must contain a single JSON object")
+	}
+	return nil
+}
+
+func (a *App) withBodyLimit(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Body != nil {
+			r.Body = http.MaxBytesReader(w, r.Body, maxBodyBytes)
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 func requireEnv(key string) (string, error) {
@@ -262,6 +321,107 @@ func firstNonEmpty(values ...string) string {
 	return ""
 }
 
+func newLoginLimiter() *LoginLimiter {
+	return &LoginLimiter{attempts: map[string]*loginAttempt{}}
+}
+
+func clientIP(r *http.Request) string {
+	if forwarded := strings.TrimSpace(r.Header.Get("X-Forwarded-For")); forwarded != "" {
+		return strings.TrimSpace(strings.Split(forwarded, ",")[0])
+	}
+	host, _, err := net.SplitHostPort(strings.TrimSpace(r.RemoteAddr))
+	if err == nil && host != "" {
+		return host
+	}
+	return strings.TrimSpace(r.RemoteAddr)
+}
+
+func (a *App) loginKey(r *http.Request, username string) string {
+	return clientIP(r) + "|" + strings.ToLower(strings.TrimSpace(username))
+}
+
+func (l *LoginLimiter) allow(key string, now time.Time) (bool, time.Duration) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if attempt, ok := l.attempts[key]; ok {
+		if attempt.BlockUntil.After(now) {
+			return false, time.Until(attempt.BlockUntil)
+		}
+		if now.Sub(attempt.WindowFrom) > loginWindow {
+			delete(l.attempts, key)
+		}
+	}
+	return true, 0
+}
+
+func (l *LoginLimiter) success(key string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	delete(l.attempts, key)
+}
+
+func (l *LoginLimiter) failure(key string, now time.Time) time.Duration {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	attempt, ok := l.attempts[key]
+	if !ok || now.Sub(attempt.WindowFrom) > loginWindow {
+		attempt = &loginAttempt{WindowFrom: now}
+		l.attempts[key] = attempt
+	}
+	attempt.Count++
+	if attempt.Count >= loginMaxFailures {
+		attempt.BlockUntil = now.Add(loginBlockDuration)
+	}
+	if attempt.BlockUntil.After(now) {
+		return time.Until(attempt.BlockUntil)
+	}
+	return 0
+}
+
+func randomTokenSecret() (string, error) {
+	buf := make([]byte, 24)
+	if _, err := crand.Read(buf); err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(buf), nil
+}
+
+func tokenSecretHash(secret string) string {
+	sum := sha256.Sum256([]byte(secret))
+	return hex.EncodeToString(sum[:])
+}
+
+func generateNodeAgentToken(nodeID int64) (string, string, error) {
+	secret, err := randomTokenSecret()
+	if err != nil {
+		return "", "", err
+	}
+	return fmt.Sprintf("gpn1.%d.%s", nodeID, secret), tokenSecretHash(secret), nil
+}
+
+func parseNodeAgentToken(raw string) (int64, string, error) {
+	parts := strings.Split(strings.TrimSpace(raw), ".")
+	if len(parts) != 3 || parts[0] != "gpn1" || parts[2] == "" {
+		return 0, "", errors.New("invalid agent token")
+	}
+	nodeID, err := strconv.ParseInt(parts[1], 10, 64)
+	if err != nil || nodeID <= 0 {
+		return 0, "", errors.New("invalid agent token")
+	}
+	return nodeID, parts[2], nil
+}
+
+func nodeTokenMatches(storedHash, secret string) bool {
+	if storedHash == "" || secret == "" {
+		return false
+	}
+	candidate := tokenSecretHash(secret)
+	if len(candidate) != len(storedHash) {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(candidate), []byte(storedHash)) == 1
+}
+
 func bearerToken(header string) string {
 	header = strings.TrimSpace(header)
 	if !strings.HasPrefix(strings.ToLower(header), "bearer ") {
@@ -283,6 +443,59 @@ func websocketToken(r *http.Request) string {
 	return ""
 }
 
+func (a *App) authenticateAgentNode(token string) (*AgentNode, error) {
+	nodeID, secret, err := parseNodeAgentToken(token)
+	if err != nil {
+		return nil, err
+	}
+	node := &AgentNode{}
+	err = a.db.QueryRow(`SELECT id,name,agent_uid,agent_token_hash FROM nodes WHERE id=$1`, nodeID).
+		Scan(&node.ID, &node.Name, &node.AgentUID, &node.AgentTokenHash)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, errors.New("unknown agent node")
+		}
+		return nil, err
+	}
+	if !nodeTokenMatches(node.AgentTokenHash, secret) {
+		return nil, errors.New("invalid agent token")
+	}
+	return node, nil
+}
+
+func (a *App) issueNodeAgentToken(ctx context.Context, nodeID int64) (string, error) {
+	token, hash, err := generateNodeAgentToken(nodeID)
+	if err != nil {
+		return "", err
+	}
+	res, err := a.db.ExecContext(ctx, `UPDATE nodes SET agent_token_hash=$2 WHERE id=$1`, nodeID, hash)
+	if err != nil {
+		return "", err
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return "", err
+	}
+	if affected == 0 {
+		return "", sql.ErrNoRows
+	}
+	return token, nil
+}
+
+func (a *App) bindNodeUID(ctx context.Context, nodeID int64, nodeUID string) error {
+	trimmed := strings.TrimSpace(nodeUID)
+	if trimmed == "" {
+		return errors.New("nodeUid is required")
+	}
+	_, err := a.db.ExecContext(ctx, `UPDATE nodes SET agent_uid=$2 WHERE id=$1 AND agent_uid=''`, nodeID, trimmed)
+	return err
+}
+
+func agentNodeFromContext(ctx context.Context) *AgentNode {
+	node, _ := ctx.Value(ctxAgentNode).(*AgentNode)
+	return node
+}
+
 func (a *App) initSchema(ctx context.Context) error {
 	schema := `
 CREATE TABLE IF NOT EXISTS users (
@@ -299,6 +512,8 @@ CREATE TABLE IF NOT EXISTS nodes (
   status TEXT NOT NULL DEFAULT 'online',
   latency_ms INT NOT NULL DEFAULT 0,
   version TEXT NOT NULL DEFAULT 'gost v3.0.0',
+  agent_uid TEXT NOT NULL DEFAULT '',
+  agent_token_hash TEXT NOT NULL DEFAULT '',
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE TABLE IF NOT EXISTS clients (
@@ -407,7 +622,10 @@ CREATE TABLE IF NOT EXISTS settings (
 	_, _ = a.db.ExecContext(ctx, `ALTER TABLE agent_tasks ADD COLUMN IF NOT EXISTS max_retries INT NOT NULL DEFAULT 3`)
 	_, _ = a.db.ExecContext(ctx, `ALTER TABLE agent_tasks ADD COLUMN IF NOT EXISTS timeout_seconds INT NOT NULL DEFAULT 300`)
 	_, _ = a.db.ExecContext(ctx, `ALTER TABLE agent_tasks ADD COLUMN IF NOT EXISTS priority INT NOT NULL DEFAULT 50`)
+	_, _ = a.db.ExecContext(ctx, `ALTER TABLE nodes ADD COLUMN IF NOT EXISTS agent_uid TEXT NOT NULL DEFAULT ''`)
+	_, _ = a.db.ExecContext(ctx, `ALTER TABLE nodes ADD COLUMN IF NOT EXISTS agent_token_hash TEXT NOT NULL DEFAULT ''`)
 	indexes := []string{
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_nodes_agent_uid ON nodes (agent_uid) WHERE agent_uid <> ''`,
 		`CREATE INDEX IF NOT EXISTS idx_agent_tasks_status_node_uid_priority ON agent_tasks (status, node_uid, priority DESC, id ASC)`,
 		`CREATE INDEX IF NOT EXISTS idx_agent_tasks_status_node_name_priority ON agent_tasks (status, node_name, priority DESC, id ASC)`,
 		`CREATE INDEX IF NOT EXISTS idx_agent_tasks_status_dispatched_at ON agent_tasks (status, dispatched_at)`,
@@ -439,8 +657,6 @@ VALUES($1,$2,'admin') ON CONFLICT (username) DO NOTHING`, adminUser, string(hash
 	if err != nil {
 		return err
 	}
-	_, _ = a.db.ExecContext(ctx, `INSERT INTO users(username,password_hash,role)
-VALUES('viewer',$1,'viewer') ON CONFLICT (username) DO NOTHING`, string(hash))
 
 	var cnt int
 	if err := a.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM nodes`).Scan(&cnt); err != nil {
@@ -524,15 +740,21 @@ func (a *App) requireAdmin(next http.Handler) http.Handler {
 	})
 }
 
-func (a *App) agentAuth(next http.Handler) http.Handler {
+func (a *App) nodeAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		h := r.Header.Get("Authorization")
-		if !strings.HasPrefix(strings.ToLower(h), "bearer ") || strings.TrimSpace(h[7:]) != a.agentToken {
-			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid agent token"})
+		node, err := a.authenticateAgentNode(bearerToken(r.Header.Get("Authorization")))
+		if err != nil {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": err.Error()})
 			return
 		}
-		next.ServeHTTP(w, r)
+		ctx := context.WithValue(r.Context(), ctxAgentNodeID, node.ID)
+		ctx = context.WithValue(ctx, ctxAgentNode, node)
+		next.ServeHTTP(w, r.WithContext(ctx))
 	})
+}
+
+func (a *App) agentAuth(next http.Handler) http.Handler {
+	return a.nodeAuth(next)
 }
 
 func (a *App) uid(ctx context.Context) int64 {
@@ -623,13 +845,9 @@ func first(v, fallback string) string {
 }
 
 func main() {
-	rand.Seed(time.Now().UnixNano())
+	mrand.Seed(time.Now().UnixNano())
 	dsn := mustEnv("DB_DSN", "postgres://gpanel:gpanel@127.0.0.1:5432/gpanel?sslmode=disable")
 	jwtSecret, err := requireEnv("JWT_SECRET")
-	if err != nil {
-		log.Fatal(err)
-	}
-	agentToken, err := requireEnv("AGENT_TOKEN")
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -652,7 +870,7 @@ func main() {
 		log.Fatal(err)
 	}
 
-	app := &App{db: db, jwtSecret: []byte(jwtSecret), agentToken: agentToken, webhookURL: webhookURL, allowedOrigins: allowedOrigins, offlineMinutes: offlineMinutes, alertDedupeMins: alertDedupeMins, taskTimeoutSecs: taskTimeoutSecs, taskMaxRetries: taskMaxRetries, taskDispatchPerNode: taskDispatchPerNode, alertSilentHours: alertSilentHours}
+	app := &App{db: db, jwtSecret: []byte(jwtSecret), webhookURL: webhookURL, allowedOrigins: allowedOrigins, loginLimiter: newLoginLimiter(), offlineMinutes: offlineMinutes, alertDedupeMins: alertDedupeMins, taskTimeoutSecs: taskTimeoutSecs, taskMaxRetries: taskMaxRetries, taskDispatchPerNode: taskDispatchPerNode, alertSilentHours: alertSilentHours}
 	ctx := context.Background()
 	if err := app.initSchema(ctx); err != nil {
 		log.Fatal(err)
@@ -671,17 +889,29 @@ func main() {
 			Username string `json:"username"`
 			Password string `json:"password"`
 		}
-		if json.NewDecoder(r.Body).Decode(&req) != nil || req.Username == "" || req.Password == "" {
+		if err := decodeJSON(w, r, &req); err != nil || req.Username == "" || req.Password == "" {
 			writeJSON(w, 400, map[string]string{"error": "invalid payload"})
+			return
+		}
+		now := time.Now()
+		loginKey := app.loginKey(r, req.Username)
+		if allowed, retryAfter := app.loginLimiter.allow(loginKey, now); !allowed {
+			w.Header().Set("Retry-After", strconv.Itoa(int(retryAfter.Round(time.Second).Seconds())))
+			writeJSON(w, 429, map[string]string{"error": "too many login attempts"})
 			return
 		}
 		var uid int64
 		var hash, role string
 		err := app.db.QueryRow(`SELECT id,password_hash,role FROM users WHERE username=$1`, req.Username).Scan(&uid, &hash, &role)
 		if err != nil || bcrypt.CompareHashAndPassword([]byte(hash), []byte(req.Password)) != nil {
+			retryAfter := app.loginLimiter.failure(loginKey, now)
+			if retryAfter > 0 {
+				w.Header().Set("Retry-After", strconv.Itoa(int(retryAfter.Round(time.Second).Seconds())))
+			}
 			writeJSON(w, 401, map[string]string{"error": "invalid credentials"})
 			return
 		}
+		app.loginLimiter.success(loginKey)
 		tok, err := app.makeToken(uid, role)
 		if err != nil {
 			writeJSON(w, 500, map[string]string{"error": "token error"})
@@ -705,8 +935,24 @@ func main() {
 			Capabilities []string `json:"capabilities"`
 			Services     []string `json:"services"`
 		}
-		if json.NewDecoder(r.Body).Decode(&req) != nil || req.NodeUID == "" || req.NodeName == "" {
+		if err := decodeJSON(w, r, &req); err != nil || strings.TrimSpace(req.NodeUID) == "" {
 			writeJSON(w, 400, map[string]string{"error": "invalid payload"})
+			return
+		}
+		node := agentNodeFromContext(r.Context())
+		if node == nil {
+			writeJSON(w, 500, map[string]string{"error": "missing agent context"})
+			return
+		}
+		req.NodeUID = strings.TrimSpace(req.NodeUID)
+		if node.AgentUID == "" {
+			if err := app.bindNodeUID(r.Context(), node.ID, req.NodeUID); err != nil {
+				writeJSON(w, 500, map[string]string{"error": "failed to bind node UID"})
+				return
+			}
+			node.AgentUID = req.NodeUID
+		} else if node.AgentUID != req.NodeUID {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "node UID mismatch"})
 			return
 		}
 		capsJSON, _ := json.Marshal(req.Capabilities)
@@ -714,20 +960,21 @@ func main() {
 		_, _ = app.db.Exec(`INSERT INTO agent_heartbeats(node_name,node_uid,node_ip,version,latency_ms,capabilities,services,created_at)
 VALUES($1,$2,$3,$4,$5,$6,$7,now())
 ON CONFLICT (node_uid)
-DO UPDATE SET node_name=EXCLUDED.node_name,node_ip=EXCLUDED.node_ip,version=EXCLUDED.version,latency_ms=EXCLUDED.latency_ms,capabilities=EXCLUDED.capabilities,services=EXCLUDED.services,created_at=now()`, req.NodeName, req.NodeUID, req.NodeIP, req.Version, req.LatencyMs, string(capsJSON), string(servicesJSON))
-		_, _ = app.db.Exec(`INSERT INTO nodes(name,region,status,latency_ms,version,updated_at)
-VALUES($1,$2,'online',$3,$4,now())
-ON CONFLICT (name) DO UPDATE SET status='online',latency_ms=EXCLUDED.latency_ms,version=EXCLUDED.version,updated_at=now()`, req.NodeName, first(req.Region, "Unknown"), req.LatencyMs, first(req.Version, "gost v3"))
+DO UPDATE SET node_name=EXCLUDED.node_name,node_ip=EXCLUDED.node_ip,version=EXCLUDED.version,latency_ms=EXCLUDED.latency_ms,capabilities=EXCLUDED.capabilities,services=EXCLUDED.services,created_at=now()`, node.Name, node.AgentUID, req.NodeIP, req.Version, req.LatencyMs, string(capsJSON), string(servicesJSON))
+		_, _ = app.db.Exec(`UPDATE nodes
+SET region=$2,status='online',latency_ms=$3,version=$4,updated_at=now()
+WHERE id=$1`, node.ID, first(req.Region, "Unknown"), req.LatencyMs, first(req.Version, "gost v3"))
 		writeJSON(w, 200, map[string]any{"ok": true})
 	})))
 
 	mux.Handle("/api/agent/tasks/next", app.agentAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		nodeUID := strings.TrimSpace(r.URL.Query().Get("nodeUid"))
-		nodeName := strings.TrimSpace(r.URL.Query().Get("nodeName"))
-		if nodeUID == "" && nodeName == "" {
-			writeJSON(w, 400, map[string]string{"error": "nodeUid or nodeName required"})
+		node := agentNodeFromContext(r.Context())
+		if node == nil {
+			writeJSON(w, 500, map[string]string{"error": "missing agent context"})
 			return
 		}
+		nodeUID := strings.TrimSpace(node.AgentUID)
+		nodeName := strings.TrimSpace(node.Name)
 		tx, err := app.db.Begin()
 		if err != nil {
 			writeJSON(w, 500, map[string]string{"error": err.Error()})
@@ -746,13 +993,14 @@ WHERE status='dispatched' AND dispatched_at IS NOT NULL
   AND retry_count >= max_retries`)
 
 		var inFlight int
-		_ = tx.QueryRow(`SELECT COUNT(*) FROM agent_tasks WHERE status='dispatched' AND (node_uid=$1 OR node_name=$2)`, nodeUID, nodeName).Scan(&inFlight)
+		_ = tx.QueryRow(`SELECT COUNT(*) FROM agent_tasks
+WHERE status='dispatched' AND ((node_uid <> '' AND node_uid=$1) OR (node_uid='' AND node_name=$2))`, nodeUID, nodeName).Scan(&inFlight)
 		if inFlight >= app.taskDispatchPerNode {
 			writeJSON(w, 200, map[string]any{"task": nil, "reason": "dispatch_limit"})
 			return
 		}
 		q := `SELECT id,node_uid,node_name,command,payload,status,result,retry_count,max_retries,timeout_seconds,priority,created_at,dispatched_at,done_at FROM agent_tasks
-WHERE status='pending' AND (node_uid=$1 OR node_name=$2 OR (node_uid='' AND node_name=''))
+WHERE status='pending' AND (((node_uid <> '' AND node_uid=$1) OR (node_uid='' AND node_name=$2)) OR (node_uid='' AND node_name=''))
 ORDER BY priority DESC, id LIMIT 1 FOR UPDATE SKIP LOCKED`
 		var t AgentTask
 		err = tx.QueryRow(q, nodeUID, nodeName).Scan(&t.ID, &t.NodeUID, &t.NodeName, &t.Command, &t.Payload, &t.Status, &t.Result, &t.RetryCount, &t.MaxRetries, &t.TimeoutSecs, &t.Priority, &t.CreatedAt, &t.Dispatched, &t.DoneAt)
@@ -764,9 +1012,20 @@ ORDER BY priority DESC, id LIMIT 1 FOR UPDATE SKIP LOCKED`
 			writeJSON(w, 500, map[string]string{"error": err.Error()})
 			return
 		}
-		_, _ = tx.Exec(`UPDATE agent_tasks SET status='dispatched', dispatched_at=now() WHERE id=$1`, t.ID)
+		_, _ = tx.Exec(`UPDATE agent_tasks
+SET status='dispatched',
+    dispatched_at=now(),
+    node_uid=CASE WHEN node_uid='' THEN $2 ELSE node_uid END,
+    node_name=CASE WHEN node_name='' THEN $3 ELSE node_name END
+WHERE id=$1`, t.ID, nodeUID, nodeName)
 		_ = tx.Commit()
 		t.Status = "dispatched"
+		if t.NodeUID == "" {
+			t.NodeUID = nodeUID
+		}
+		if t.NodeName == "" {
+			t.NodeName = nodeName
+		}
 		now := time.Now()
 		t.Dispatched = &now
 		writeJSON(w, 200, map[string]any{"task": t})
@@ -791,8 +1050,13 @@ ORDER BY priority DESC, id LIMIT 1 FOR UPDATE SKIP LOCKED`
 			Status string `json:"status"`
 			Result string `json:"result"`
 		}
-		if json.NewDecoder(r.Body).Decode(&req) != nil || req.Status == "" {
+		if err := decodeJSON(w, r, &req); err != nil || req.Status == "" {
 			writeJSON(w, 400, map[string]string{"error": "invalid payload"})
+			return
+		}
+		node := agentNodeFromContext(r.Context())
+		if node == nil {
+			writeJSON(w, 500, map[string]string{"error": "missing agent context"})
 			return
 		}
 		storedStatus := req.Status
@@ -808,14 +1072,31 @@ ORDER BY priority DESC, id LIMIT 1 FOR UPDATE SKIP LOCKED`
 			writeJSON(w, 400, map[string]string{"error": "result must be valid JSON string"})
 			return
 		}
-		_, _ = app.db.Exec(`UPDATE agent_tasks SET status=$2,result=$3,done_at=now() WHERE id=$1`, id, storedStatus, req.Result)
+		res, err := app.db.Exec(`UPDATE agent_tasks
+SET status=$2,result=$3,done_at=now()
+WHERE id=$1 AND ((node_uid <> '' AND node_uid=$4) OR (node_uid='' AND node_name=$5))`, id, storedStatus, req.Result, strings.TrimSpace(node.AgentUID), node.Name)
+		if err != nil {
+			writeJSON(w, 500, map[string]string{"error": err.Error()})
+			return
+		}
+		affected, err := res.RowsAffected()
+		if err != nil {
+			writeJSON(w, 500, map[string]string{"error": err.Error()})
+			return
+		}
+		if affected == 0 {
+			writeJSON(w, 404, map[string]string{"error": "task not found for this node"})
+			return
+		}
 		writeJSON(w, 200, map[string]any{"ok": true})
 	})))
 
 	api := http.NewServeMux()
 	createNodeTask := func(nodeName, command string, payload map[string]any) error {
 		p, _ := json.Marshal(payload)
-		_, err := app.db.Exec(`INSERT INTO agent_tasks(node_uid,node_name,command,payload,status,retry_count,max_retries,timeout_seconds,priority) VALUES('',$1,$2,$3,'pending',0,$4,$5,$6)`, nodeName, command, string(p), app.taskMaxRetries, app.taskTimeoutSecs, 60)
+		var nodeUID string
+		_ = app.db.QueryRow(`SELECT COALESCE(agent_uid,'') FROM nodes WHERE name=$1`, nodeName).Scan(&nodeUID)
+		_, err := app.db.Exec(`INSERT INTO agent_tasks(node_uid,node_name,command,payload,status,retry_count,max_retries,timeout_seconds,priority) VALUES($1,$2,$3,$4,'pending',0,$5,$6,$7)`, nodeUID, nodeName, command, string(p), app.taskMaxRetries, app.taskTimeoutSecs, 60)
 		return err
 	}
 	mustNodeName := func(nodeID int64) (string, error) {
@@ -900,7 +1181,7 @@ ORDER BY priority DESC, id LIMIT 1 FOR UPDATE SKIP LOCKED`
 		_ = app.db.QueryRow(`SELECT COUNT(*) FILTER (WHERE status='online'), COUNT(*) FROM nodes`).Scan(&s.OnlineNodes, &s.TotalNodes)
 		_ = app.db.QueryRow(`SELECT COUNT(*) FILTER (WHERE status='online') FROM clients`).Scan(&s.ActiveClients)
 		_ = app.db.QueryRow(`SELECT COUNT(*) FILTER (WHERE read=false) FROM alerts`).Scan(&s.Alerts)
-		s.CurrentTraffic = float64(rand.Intn(700)+150) / 10
+		s.CurrentTraffic = float64(mrand.Intn(700)+150) / 10
 		writeJSON(w, 200, s)
 	})
 
@@ -914,12 +1195,12 @@ ORDER BY priority DESC, id LIMIT 1 FOR UPDATE SKIP LOCKED`
 	})
 
 	api.HandleFunc("/api/runtime/details", func(w http.ResponseWriter, r *http.Request) {
-		nodeRows, _ := app.db.Query(`SELECT id,name,region,status,latency_ms,version,updated_at FROM nodes ORDER BY updated_at DESC, id ASC LIMIT 20`)
+		nodeRows, _ := app.db.Query(`SELECT id,name,region,status,latency_ms,version,agent_uid,agent_token_hash <> '',updated_at FROM nodes ORDER BY updated_at DESC, id ASC LIMIT 20`)
 		defer nodeRows.Close()
 		nodes := []Node{}
 		for nodeRows.Next() {
 			var n Node
-			_ = nodeRows.Scan(&n.ID, &n.Name, &n.Region, &n.Status, &n.LatencyMs, &n.Version, &n.UpdatedAt)
+			_ = nodeRows.Scan(&n.ID, &n.Name, &n.Region, &n.Status, &n.LatencyMs, &n.Version, &n.AgentUID, &n.HasAgentToken, &n.UpdatedAt)
 			nodes = append(nodes, n)
 		}
 
@@ -1534,7 +1815,7 @@ ORDER BY priority DESC, id LIMIT 1 FOR UPDATE SKIP LOCKED`
 	api.HandleFunc("/api/nodes", func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodGet:
-			rows, err := app.db.Query(`SELECT id,name,region,status,latency_ms,version,updated_at FROM nodes ORDER BY id`)
+			rows, err := app.db.Query(`SELECT id,name,region,status,latency_ms,version,agent_uid,agent_token_hash <> '',updated_at FROM nodes ORDER BY id`)
 			if err != nil {
 				writeJSON(w, 500, map[string]string{"error": err.Error()})
 				return
@@ -1543,7 +1824,7 @@ ORDER BY priority DESC, id LIMIT 1 FOR UPDATE SKIP LOCKED`
 			out := []Node{}
 			for rows.Next() {
 				var n Node
-				_ = rows.Scan(&n.ID, &n.Name, &n.Region, &n.Status, &n.LatencyMs, &n.Version, &n.UpdatedAt)
+				_ = rows.Scan(&n.ID, &n.Name, &n.Region, &n.Status, &n.LatencyMs, &n.Version, &n.AgentUID, &n.HasAgentToken, &n.UpdatedAt)
 				out = append(out, n)
 			}
 			writeJSON(w, 200, out)
@@ -1554,7 +1835,7 @@ ORDER BY priority DESC, id LIMIT 1 FOR UPDATE SKIP LOCKED`
 				Status  string `json:"status"`
 				Version string `json:"version"`
 			}
-			if json.NewDecoder(r.Body).Decode(&req) != nil || req.Name == "" || req.Region == "" {
+			if err := decodeJSON(w, r, &req); err != nil || req.Name == "" || req.Region == "" {
 				writeJSON(w, 400, map[string]string{"error": "invalid payload"})
 				return
 			}
@@ -1569,17 +1850,37 @@ ORDER BY priority DESC, id LIMIT 1 FOR UPDATE SKIP LOCKED`
 			version := firstNonEmpty(req.Version, "pending-agent")
 			latency := 0
 			if status == "online" {
-				latency = rand.Intn(70) + 20
+				latency = mrand.Intn(70) + 20
 			}
-			var n Node
-			err := app.db.QueryRow(`INSERT INTO nodes(name,region,status,latency_ms,version,updated_at) VALUES($1,$2,$3,$4,$5,now()) RETURNING id,name,region,status,latency_ms,version,updated_at`, req.Name, req.Region, status, latency, version).
-				Scan(&n.ID, &n.Name, &n.Region, &n.Status, &n.LatencyMs, &n.Version, &n.UpdatedAt)
+			tx, err := app.db.BeginTx(r.Context(), nil)
 			if err != nil {
 				writeJSON(w, 500, map[string]string{"error": err.Error()})
 				return
 			}
+			defer tx.Rollback()
+			var n Node
+			err = tx.QueryRowContext(r.Context(), `INSERT INTO nodes(name,region,status,latency_ms,version,updated_at) VALUES($1,$2,$3,$4,$5,now()) RETURNING id,name,region,status,latency_ms,version,agent_uid,updated_at`, req.Name, req.Region, status, latency, version).
+				Scan(&n.ID, &n.Name, &n.Region, &n.Status, &n.LatencyMs, &n.Version, &n.AgentUID, &n.UpdatedAt)
+			if err != nil {
+				writeJSON(w, 500, map[string]string{"error": err.Error()})
+				return
+			}
+			token, hash, err := generateNodeAgentToken(n.ID)
+			if err != nil {
+				writeJSON(w, 500, map[string]string{"error": err.Error()})
+				return
+			}
+			if _, err := tx.ExecContext(r.Context(), `UPDATE nodes SET agent_token_hash=$2 WHERE id=$1`, n.ID, hash); err != nil {
+				writeJSON(w, 500, map[string]string{"error": err.Error()})
+				return
+			}
+			if err := tx.Commit(); err != nil {
+				writeJSON(w, 500, map[string]string{"error": err.Error()})
+				return
+			}
+			n.HasAgentToken = true
 			app.audit(r.Context(), "node.create", fmt.Sprintf("node/%d", n.ID), n.Name)
-			writeJSON(w, 201, n)
+			writeJSON(w, 201, map[string]any{"node": n, "agentToken": token})
 		default:
 			w.WriteHeader(http.StatusMethodNotAllowed)
 		}
@@ -1596,10 +1897,25 @@ ORDER BY priority DESC, id LIMIT 1 FOR UPDATE SKIP LOCKED`
 			return
 		}
 
+		if len(parts) == 4 && parts[3] == "token" && r.Method == http.MethodPost {
+			token, err := app.issueNodeAgentToken(r.Context(), id)
+			if errors.Is(err, sql.ErrNoRows) {
+				writeJSON(w, 404, map[string]string{"error": "node not found"})
+				return
+			}
+			if err != nil {
+				writeJSON(w, 500, map[string]string{"error": err.Error()})
+				return
+			}
+			app.audit(r.Context(), "node.token.rotate", fmt.Sprintf("node/%d", id), "rotated")
+			writeJSON(w, 200, map[string]any{"ok": true, "agentToken": token})
+			return
+		}
+
 		if len(parts) == 4 && parts[3] == "toggle" && r.Method == http.MethodPatch {
-			_, _ = app.db.Exec(`UPDATE nodes SET status=CASE WHEN status='online' THEN 'offline' ELSE 'online' END, latency_ms=CASE WHEN status='online' THEN 0 ELSE $2 END, updated_at=now() WHERE id=$1`, id, rand.Intn(70)+20)
+			_, _ = app.db.Exec(`UPDATE nodes SET status=CASE WHEN status='online' THEN 'offline' ELSE 'online' END, latency_ms=CASE WHEN status='online' THEN 0 ELSE $2 END, updated_at=now() WHERE id=$1`, id, mrand.Intn(70)+20)
 			var n Node
-			err = app.db.QueryRow(`SELECT id,name,region,status,latency_ms,version,updated_at FROM nodes WHERE id=$1`, id).Scan(&n.ID, &n.Name, &n.Region, &n.Status, &n.LatencyMs, &n.Version, &n.UpdatedAt)
+			err = app.db.QueryRow(`SELECT id,name,region,status,latency_ms,version,agent_uid,agent_token_hash <> '',updated_at FROM nodes WHERE id=$1`, id).Scan(&n.ID, &n.Name, &n.Region, &n.Status, &n.LatencyMs, &n.Version, &n.AgentUID, &n.HasAgentToken, &n.UpdatedAt)
 			if err != nil {
 				writeJSON(w, 404, map[string]string{"error": "node not found"})
 				return
@@ -1615,13 +1931,13 @@ ORDER BY priority DESC, id LIMIT 1 FOR UPDATE SKIP LOCKED`
 				Region  string `json:"region"`
 				Version string `json:"version"`
 			}
-			if json.NewDecoder(r.Body).Decode(&req) != nil {
+			if err := decodeJSON(w, r, &req); err != nil {
 				writeJSON(w, 400, map[string]string{"error": "invalid payload"})
 				return
 			}
 			_, _ = app.db.Exec(`UPDATE nodes SET name=COALESCE(NULLIF($2,''),name), region=COALESCE(NULLIF($3,''),region), version=COALESCE(NULLIF($4,''),version), updated_at=now() WHERE id=$1`, id, req.Name, req.Region, req.Version)
 			var n Node
-			err = app.db.QueryRow(`SELECT id,name,region,status,latency_ms,version,updated_at FROM nodes WHERE id=$1`, id).Scan(&n.ID, &n.Name, &n.Region, &n.Status, &n.LatencyMs, &n.Version, &n.UpdatedAt)
+			err = app.db.QueryRow(`SELECT id,name,region,status,latency_ms,version,agent_uid,agent_token_hash <> '',updated_at FROM nodes WHERE id=$1`, id).Scan(&n.ID, &n.Name, &n.Region, &n.Status, &n.LatencyMs, &n.Version, &n.AgentUID, &n.HasAgentToken, &n.UpdatedAt)
 			if err != nil {
 				writeJSON(w, 404, map[string]string{"error": "node not found"})
 				return
@@ -1736,7 +2052,7 @@ ORDER BY priority DESC, id LIMIT 1 FOR UPDATE SKIP LOCKED`
 				return
 			}
 			var c Client
-			err := app.db.QueryRow(`INSERT INTO clients(name,protocol,node_id,status,rx_mb,tx_mb,updated_at) VALUES($1,$2,$3,'online',$4,$5,now()) RETURNING id,name,protocol,node_id,status,rx_mb,tx_mb,updated_at`, req.Name, req.Protocol, req.NodeID, rand.Float64()*2000, rand.Float64()*1200).Scan(&c.ID, &c.Name, &c.Protocol, &c.NodeID, &c.Status, &c.RxMB, &c.TxMB, &c.UpdatedAt)
+			err := app.db.QueryRow(`INSERT INTO clients(name,protocol,node_id,status,rx_mb,tx_mb,updated_at) VALUES($1,$2,$3,'online',$4,$5,now()) RETURNING id,name,protocol,node_id,status,rx_mb,tx_mb,updated_at`, req.Name, req.Protocol, req.NodeID, mrand.Float64()*2000, mrand.Float64()*1200).Scan(&c.ID, &c.Name, &c.Protocol, &c.NodeID, &c.Status, &c.RxMB, &c.TxMB, &c.UpdatedAt)
 			if err != nil {
 				writeJSON(w, 500, map[string]string{"error": err.Error()})
 				return
@@ -1790,7 +2106,7 @@ ORDER BY priority DESC, id LIMIT 1 FOR UPDATE SKIP LOCKED`
 				return
 			}
 			var f ForwardRule
-			err := app.db.QueryRow(`INSERT INTO forwards(name,listen_addr,target_addr,protocol,status,node_id,connections,updated_at) VALUES($1,$2,$3,$4,'enabled',$5,$6,now()) RETURNING id,name,listen_addr,target_addr,protocol,status,node_id,connections,updated_at`, req.Name, req.ListenAddr, req.TargetAddr, req.Protocol, req.NodeID, rand.Intn(10)).Scan(&f.ID, &f.Name, &f.ListenAddr, &f.TargetAddr, &f.Protocol, &f.Status, &f.NodeID, &f.Connections, &f.UpdatedAt)
+			err := app.db.QueryRow(`INSERT INTO forwards(name,listen_addr,target_addr,protocol,status,node_id,connections,updated_at) VALUES($1,$2,$3,$4,'enabled',$5,$6,now()) RETURNING id,name,listen_addr,target_addr,protocol,status,node_id,connections,updated_at`, req.Name, req.ListenAddr, req.TargetAddr, req.Protocol, req.NodeID, mrand.Intn(10)).Scan(&f.ID, &f.Name, &f.ListenAddr, &f.TargetAddr, &f.Protocol, &f.Status, &f.NodeID, &f.Connections, &f.UpdatedAt)
 			if err != nil {
 				writeJSON(w, 500, map[string]string{"error": err.Error()})
 				return
@@ -1983,7 +2299,7 @@ ORDER BY priority DESC, id LIMIT 1 FOR UPDATE SKIP LOCKED`
 			_ = app.db.QueryRow(`SELECT COUNT(*) FILTER (WHERE status='online'), COUNT(*) FROM nodes`).Scan(&s.OnlineNodes, &s.TotalNodes)
 			_ = app.db.QueryRow(`SELECT COUNT(*) FILTER (WHERE status='online') FROM clients`).Scan(&s.ActiveClients)
 			_ = app.db.QueryRow(`SELECT COUNT(*) FILTER (WHERE read=false) FROM alerts`).Scan(&s.Alerts)
-			s.CurrentTraffic = float64(rand.Intn(700)+150) / 10
+			s.CurrentTraffic = float64(mrand.Intn(700)+150) / 10
 			if conn.WriteJSON(s) != nil {
 				return
 			}
@@ -1999,7 +2315,7 @@ ORDER BY priority DESC, id LIMIT 1 FOR UPDATE SKIP LOCKED`
 
 	addr := ":" + port
 	log.Printf("gpanel backend listening on %s", addr)
-	if err := http.ListenAndServe(addr, app.withCORS(mux)); err != nil {
+	if err := http.ListenAndServe(addr, app.withBodyLimit(app.withCORS(mux))); err != nil {
 		log.Fatal(err)
 	}
 }

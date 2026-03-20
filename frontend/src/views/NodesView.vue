@@ -13,7 +13,7 @@
 
     <div class="card" style="margin-bottom:16px">
       <p><strong>第二节点接入路径</strong></p>
-      <p class="hint">1) 先创建 offline / pending-agent 草稿节点；2) 在目标主机运行 install-agent.sh 并使用同一 panel URL + agent token；3) agent 心跳到达后，节点会从草稿状态变成真实在线节点。</p>
+      <p class="hint">1) 先创建 offline / pending-agent 草稿节点；2) 创建后立即保存一次性节点 token；3) 在目标主机运行 install-agent.sh 并使用 panel URL + 该节点 token；4) 如需重装 agent，可在节点行重新生成 token。</p>
     </div>
 
     <table>
@@ -43,6 +43,7 @@
             <button v-else @click="saveEdit(n.id)">保存</button>
             <button v-if="editingId === n.id" @click="cancelEdit">取消</button>
             <button @click="showHeartbeats(n.id)">详情</button>
+            <button @click="rotateToken(n.id, n.name)">令牌</button>
             <button @click="installGost(n.id)">安装GOST</button>
             <button @click="startTunnel(n.id)">启隧道</button>
             <button @click="removeNode(n.id)">删除</button>
@@ -82,8 +83,14 @@ const heartbeats = ref([])
 
 const load = async () => { nodes.value = await api.nodes() }
 
+const revealToken = (token, nodeName) => {
+  if (!token) return
+  window.prompt(`Copy the agent token for ${nodeName}:`, token)
+}
+
 const createNode = async () => {
-  await api.addNode(form.value)
+  const res = await api.addNode(form.value)
+  revealToken(res.agentToken, (res.node && res.node.name) || form.value.name)
   form.value = { name: '', region: '', status: 'offline', version: 'pending-agent' }
   await load()
 }
@@ -111,6 +118,12 @@ const removeNode = async (id) => {
 const showHeartbeats = async (id) => {
   heartbeatNodeId.value = id
   heartbeats.value = await api.nodeHeartbeats(id)
+}
+
+const rotateToken = async (id, name) => {
+  const res = await api.rotateNodeToken(id)
+  revealToken(res.agentToken, name)
+  await load()
 }
 
 const installGost = async (id) => {

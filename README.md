@@ -86,7 +86,7 @@ http://<SERVER_IP>/
 
 - `ADMIN_USER` 默认是 `admin`
 - `ADMIN_PASSWORD` 安装脚本会自动生成
-- `AGENT_TOKEN` 安装脚本会自动生成
+- 节点创建后由 GPanel 一次性签发 node-specific agent token
 
 ### 方式二：本地源码启动
 
@@ -95,7 +95,6 @@ http://<SERVER_IP>/
 ```bash
 export POSTGRES_PASSWORD='change-me'
 export JWT_SECRET='change-me'
-export AGENT_TOKEN='change-me'
 export ADMIN_PASSWORD='change-me'
 
 docker compose up -d --build
@@ -115,7 +114,7 @@ Linux 主机接入：
 ```bash
 curl -fsSL https://raw.githubusercontent.com/supernaga/gpanel/main/deploy/install-agent.sh | bash -s -- \
   --panel http://<PANEL_IP> \
-  --token <AGENT_TOKEN> \
+  --token <NODE_AGENT_TOKEN> \
   --name node-01
 ```
 
@@ -141,7 +140,6 @@ curl -fsSL https://raw.githubusercontent.com/supernaga/gpanel/main/deploy/instal
 | --- | --- |
 | `POSTGRES_PASSWORD` | PostgreSQL 密码 |
 | `JWT_SECRET` | JWT 签名密钥 |
-| `AGENT_TOKEN` | Agent 注册与任务拉取凭据 |
 | `ADMIN_PASSWORD` | 初始管理员密码 |
 
 ### 常用可选项
@@ -164,7 +162,7 @@ curl -fsSL https://raw.githubusercontent.com/supernaga/gpanel/main/deploy/instal
 ## 安全基线
 
 - 不要使用弱密码或演示密钥
-- 将 `AGENT_TOKEN` 视为敏感凭据
+- 将每个节点的 agent token 视为敏感凭据
 - 生产环境建议放在 HTTPS 反向代理后
 - 如果前端与后端跨域部署，配置 `ALLOWED_ORIGINS`
 - `viewer` 角色是只读角色

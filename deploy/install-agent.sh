@@ -16,7 +16,7 @@ esac
 done
 
 if [ -z "$PANEL" ] || [ -z "$TOKEN" ]; then
-  echo "Usage: bash install-agent.sh --panel http://PANEL_IP --token AGENT_TOKEN [--name node-01]"
+  echo "Usage: bash install-agent.sh --panel http://PANEL_IP --token NODE_AGENT_TOKEN [--name node-01]"
   exit 1
 fi
 
